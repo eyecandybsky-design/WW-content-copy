@@ -22,9 +22,11 @@ jobs:
           MAX_PAGES: '30'
         run: python womenworld_media.py
       - name: Persist published history
+        if: success()
         run: |
           if [ -f womenworld_state.json ]; then
             git config user.name 'github-actions[bot]'
             git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
             git add womenworld_state.json
             git diff --cached --quiet || (git commit -m 'Update WomenWorld media history' && git push)
+          fi
