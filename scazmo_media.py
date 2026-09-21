@@ -3,6 +3,7 @@ import os
 import re
 import json
 import time
+import random
 import urllib.request
 
 from datetime import datetime, timedelta, timezone
@@ -29,7 +30,10 @@ TARGET = os.getenv(
 PASSWORD = os.environ["BSKY_PASSWORD"]
 
 STATE = Path(
-    os.getenv("STATE_FILE", "scazmo_state.json")
+    os.getenv(
+        "STATE_FILE",
+        "scazmo_state.json"
+    )
 )
 
 MIN_AGE_DAYS = int(
@@ -45,16 +49,15 @@ MAX_POSTS = int(
 )
 
 DRY_RUN = (
-    os.getenv("DRY_RUN", "false").lower() == "true"
+    os.getenv("DRY_RUN", "false").lower()
+    == "true"
 )
 
-# Reboost
-
+# Reboost instellingen
 OWN_REBOOST_COUNT = 3
 REBOOST_DELAY = 2
 
-# RedFox
-
+# RedFox instellingen
 REDFOX_HANDLE = "redfoxofficial.bsky.social"
 
 REDFOX_TEXT = "❣️ @" + REDFOX_HANDLE
@@ -67,7 +70,7 @@ REDFOX_PATTERN = re.compile(
 
 
 # ==========================================
-# DOWNLOAD
+# MEDIA DOWNLOADEN
 # ==========================================
 
 def download(url):
@@ -159,7 +162,6 @@ def make_caption(client, original_text):
 
     redfox_did = profile.did
 
-    # Caption
     caption = REDFOX_TEXT
 
     # Bluesky gebruikt UTF-8 byteposities
@@ -215,7 +217,6 @@ def reboost_own_posts(client):
     for item in result.feed:
 
         post = item.post
-
         record = post.record
 
         # Geen reposts
@@ -230,6 +231,7 @@ def reboost_own_posts(client):
         if post.author.did != own_did:
             continue
 
+        # Alleen originele posts
         if not isinstance(
             record,
             models.AppBskyFeedPost.Record
@@ -265,7 +267,7 @@ def reboost_own_posts(client):
         if len(own_posts) >= OWN_REBOOST_COUNT:
             break
 
-    # Oudste eerst
+    # Oudste eerst, nieuwste als laatste
     own_posts.reverse()
 
     for post in own_posts:
@@ -276,7 +278,7 @@ def reboost_own_posts(client):
             cid = post.cid
 
             print(
-                f"Reboost: {uri}"
+                f"Reboost geselecteerd: {uri}"
             )
 
             if DRY_RUN:
@@ -298,7 +300,7 @@ def reboost_own_posts(client):
                 if viewer else None
             )
 
-            # Eerst unrepost
+            # Eerst unrepost uitvoeren
             if repost_uri:
 
                 client.delete_repost(
@@ -313,7 +315,7 @@ def reboost_own_posts(client):
                     REBOOST_DELAY
                 )
 
-            # Daarna repost
+            # Daarna opnieuw reposten
             client.repost(
                 uri,
                 cid
@@ -330,16 +332,17 @@ def reboost_own_posts(client):
         except Exception as exc:
 
             print(
-                f"Reboost mislukt: {exc}"
+                f"Reboost mislukt voor "
+                f"{post.uri}: {exc}"
             )
 
     print(
-        "Reboost afgerond."
+        "Reboost laatste 3 eigen posts afgerond."
     )
 
 
 # ==========================================
-# MEDIA PUBLICEREN
+# MEDIA OPHALEN EN PUBLICEREN
 # ==========================================
 
 def main():
@@ -355,10 +358,16 @@ def main():
         f"Ingelogd als: {TARGET}"
     )
 
-    # Eerst eigen posts reboosten
+    # ======================================
+    # STAP 1: EERST EIGEN POSTS REBOOSTEN
+    # ======================================
+
     reboost_own_posts(client)
 
-    # Publicatiegeschiedenis
+    # ======================================
+    # STAP 2: PUBLICATIEGESCHIEDENIS
+    # ======================================
+
     state = load_state()
 
     published = state["published"]
@@ -373,7 +382,7 @@ def main():
     candidates = []
 
     print(
-        f"Bronaccount: {SOURCE}"
+        f"Media ophalen van: {SOURCE}"
     )
 
     # ======================================
@@ -392,7 +401,6 @@ def main():
         for item in result.feed:
 
             post = item.post
-
             record = post.record
 
             if not isinstance(
@@ -423,7 +431,7 @@ def main():
                 None
             )
 
-            # Alleen originele foto- en videoposts
+            # Alleen originele foto's en video's
             if not isinstance(
                 embed,
                 (
@@ -440,7 +448,7 @@ def main():
                 )
             )
 
-            # Minimaal 30 dagen oud
+            # Alleen media van minimaal 30 dagen oud
             if created > cutoff:
                 continue
 
@@ -450,7 +458,6 @@ def main():
             if uri in published:
                 continue
 
-            # Originele tekst bewaren
             original_text = getattr(
                 record,
                 "text",
@@ -458,7 +465,7 @@ def main():
             ) or ""
 
             # ==================================
-            # FOTO'S AFZONDERLIJK
+            # FOTO'S AFZONDERLIJK TOEVOEGEN
             # ==================================
 
             if isinstance(
@@ -489,7 +496,7 @@ def main():
                     )
 
             # ==================================
-            # VIDEO
+            # VIDEO TOEVOEGEN
             # ==================================
 
             elif isinstance(
@@ -520,11 +527,14 @@ def main():
         if not cursor:
             break
 
-    # Nieuwste geschikte media eerst
-    candidates.sort(
-        key=lambda item: item[0],
-        reverse=True
-    )
+    # ======================================
+    # RANDOM MEDIASELECTIE
+    # ======================================
+
+    # Alle gevonden geschikte media
+    # willekeurig door elkaar husselen.
+
+    random.shuffle(candidates)
 
     if not candidates:
 
@@ -534,10 +544,15 @@ def main():
 
         return
 
+    print(
+        f"Aantal beschikbare media: "
+        f"{len(candidates)}"
+    )
+
     count = 0
 
     # ======================================
-    # MEDIA VERWERKEN
+    # MEDIA PUBLICEREN
     # ======================================
 
     for (
@@ -553,7 +568,7 @@ def main():
             break
 
         print(
-            f"Geselecteerd: {media_key}"
+            f"Random geselecteerd: {media_key}"
         )
 
         if DRY_RUN:
@@ -569,7 +584,7 @@ def main():
         try:
 
             # ==================================
-            # FOTO
+            # ÉÉN FOTO PUBLICEREN
             # ==================================
 
             if media_type == "image":
@@ -590,6 +605,7 @@ def main():
                     raw
                 ).blob
 
+                # Slechts één foto per post
                 new_image = (
                     models.AppBskyEmbedImages.Image(
                         alt="",
@@ -598,7 +614,6 @@ def main():
                     )
                 )
 
-                # Eén foto per post
                 new_embed = (
                     models.AppBskyEmbedImages.Main(
                         images=[new_image]
@@ -606,7 +621,7 @@ def main():
                 )
 
             # ==================================
-            # VIDEO
+            # ÉÉN VIDEO PUBLICEREN
             # ==================================
 
             else:
@@ -636,7 +651,7 @@ def main():
                 )
 
             # ==================================
-            # CAPTION EN REDFOX-MENTION
+            # REDFOX-CAPTION
             # ==================================
 
             caption, facets = make_caption(
@@ -655,7 +670,7 @@ def main():
             )
 
             # ==================================
-            # PUBLICATIEGESCHIEDENIS
+            # PUBLICATIEGESCHIEDENIS OPSLAAN
             # ==================================
 
             published[media_key] = response.uri
@@ -684,7 +699,7 @@ def main():
 
 
 # ==========================================
-# START
+# START SCRIPT
 # ==========================================
 
 if __name__ == "__main__":
