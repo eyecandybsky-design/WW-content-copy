@@ -2,6 +2,7 @@
 import os
 import json
 import time
+import random
 import urllib.request
 
 from datetime import datetime, timedelta, timezone
@@ -15,39 +16,45 @@ from atproto import Client, models
 # ==========================================
 
 SOURCE = os.getenv(
-    'SOURCE_ACCOUNT',
-    'tullageback.bsky.social'
-).lstrip('@')
+    "SOURCE_ACCOUNT",
+    "tullageback.bsky.social"
+).lstrip("@")
 
 TARGET = os.getenv(
-    'BSKY_USERNAME',
-    'womenworld.bsky.social'
-).lstrip('@')
+    "BSKY_USERNAME",
+    "womenworld.bsky.social"
+).lstrip("@")
 
-PASSWORD = os.environ['BSKY_PASSWORD']
+PASSWORD = os.environ["BSKY_PASSWORD"]
 
 STATE = Path(
-    os.getenv('STATE_FILE', 'womenworld_state.json')
+    os.getenv(
+        "STATE_FILE",
+        "womenworld_state.json"
+    )
 )
 
+# Alleen media van minimaal 30 dagen oud
 MIN_AGE_DAYS = int(
-    os.getenv('MIN_AGE_DAYS', '30')
+    os.getenv("MIN_AGE_DAYS", "30")
 )
 
+# Maximaal aantal bronpagina's doorzoeken
 MAX_PAGES = int(
-    os.getenv('MAX_PAGES', '30')
+    os.getenv("MAX_PAGES", "30")
 )
 
+# Maximaal aantal nieuwe mediaposts per run
 MAX_POSTS = int(
-    os.getenv('MAX_POSTS', '1')
+    os.getenv("MAX_POSTS", "1")
 )
 
 DRY_RUN = (
-    os.getenv('DRY_RUN', 'false').lower() == 'true'
+    os.getenv("DRY_RUN", "false").lower()
+    == "true"
 )
 
 # Reboost instellingen
-
 OWN_REBOOST_COUNT = 3
 
 REBOOST_DELAY = 2
@@ -62,7 +69,7 @@ def download(url):
     req = urllib.request.Request(
         url,
         headers={
-            'User-Agent': 'WomenWorldMedia/1.0'
+            "User-Agent": "WomenWorldMedia/1.0"
         }
     )
 
@@ -83,14 +90,14 @@ def load_state():
     if STATE.exists():
 
         state = json.loads(
-            STATE.read_text()
+            STATE.read_text(encoding="utf-8")
         )
 
     else:
 
-        state = {'published': {}}
+        state = {"published": {}}
 
-    state.setdefault('published', {})
+    state.setdefault("published", {})
 
     return state
 
@@ -101,7 +108,8 @@ def save_state(state):
         json.dumps(
             state,
             indent=2
-        )
+        ),
+        encoding="utf-8"
     )
 
 
@@ -112,7 +120,7 @@ def save_state(state):
 def reboost_own_posts(client):
 
     print(
-        'Start reboost laatste 3 eigen posts...'
+        "Start reboost laatste 3 eigen posts..."
     )
 
     own_did = client.me.did
@@ -127,13 +135,12 @@ def reboost_own_posts(client):
     for item in result.feed:
 
         post = item.post
-
         record = post.record
 
         # Geen reposts
         if getattr(
             item,
-            'reason',
+            "reason",
             None
         ) is not None:
             continue
@@ -152,7 +159,7 @@ def reboost_own_posts(client):
         # Geen replies
         if getattr(
             record,
-            'reply',
+            "reply",
             None
         ) is not None:
             continue
@@ -160,7 +167,7 @@ def reboost_own_posts(client):
         # Geen quote-posts
         embed = getattr(
             record,
-            'embed',
+            "embed",
             None
         )
 
@@ -178,16 +185,7 @@ def reboost_own_posts(client):
         if len(own_posts) >= OWN_REBOOST_COUNT:
             break
 
-    if not own_posts:
-
-        print(
-            'Geen eigen posts gevonden.'
-        )
-
-        return
-
     # Oudste eerst, nieuwste als laatste
-
     own_posts.reverse()
 
     for post in own_posts:
@@ -195,40 +193,36 @@ def reboost_own_posts(client):
         try:
 
             uri = post.uri
-
             cid = post.cid
 
             print(
-                f'Reboost geselecteerd: {uri}'
+                f"Reboost geselecteerd: {uri}"
             )
 
             if DRY_RUN:
 
                 print(
-                    'DRY_RUN: reboost overgeslagen.'
+                    "DRY_RUN: reboost overgeslagen."
                 )
 
                 continue
 
-            # Bestaande repost controleren
-
             viewer = getattr(
                 post,
-                'viewer',
+                "viewer",
                 None
             )
 
             repost_uri = (
                 getattr(
                     viewer,
-                    'repost',
+                    "repost",
                     None
                 )
                 if viewer else None
             )
 
             # Eerst unrepost uitvoeren
-
             if repost_uri:
 
                 client.delete_repost(
@@ -236,28 +230,24 @@ def reboost_own_posts(client):
                 )
 
                 print(
-                    'Unrepost uitgevoerd.'
+                    "Unrepost uitgevoerd."
                 )
-
-                # Twee seconden wachten
 
                 time.sleep(
                     REBOOST_DELAY
                 )
 
-            # Opnieuw reposten
-
+            # Daarna opnieuw reposten
             client.repost(
                 uri,
                 cid
             )
 
             print(
-                'Repost uitgevoerd.'
+                "Repost uitgevoerd."
             )
 
             # Twee seconden tussen de posts
-
             time.sleep(
                 REBOOST_DELAY
             )
@@ -265,12 +255,12 @@ def reboost_own_posts(client):
         except Exception as exc:
 
             print(
-                f'Reboost mislukt voor '
-                f'{post.uri}: {exc}'
+                f"Reboost mislukt voor "
+                f"{post.uri}: {exc}"
             )
 
     print(
-        'Reboost laatste 3 eigen posts afgerond.'
+        "Reboost laatste 3 eigen posts afgerond."
     )
 
 
@@ -288,16 +278,14 @@ def main():
     )
 
     print(
-        f'Ingelogd als: {TARGET}'
+        f"Ingelogd als: {TARGET}"
     )
 
     # ======================================
     # STAP 1: EERST EIGEN POSTS REBOOSTEN
     # ======================================
 
-    reboost_own_posts(
-        client
-    )
+    reboost_own_posts(client)
 
     # ======================================
     # STAP 2: PUBLICATIEGESCHIEDENIS
@@ -305,7 +293,7 @@ def main():
 
     state = load_state()
 
-    published = state['published']
+    published = state["published"]
 
     cutoff = (
         datetime.now(timezone.utc)
@@ -317,7 +305,7 @@ def main():
     candidates = []
 
     print(
-        f'Media ophalen van: {SOURCE}'
+        f"Media ophalen van: {SOURCE}"
     )
 
     # ======================================
@@ -330,13 +318,12 @@ def main():
             actor=SOURCE,
             limit=100,
             cursor=cursor,
-            filter='posts_with_media'
+            filter="posts_with_media"
         )
 
         for item in result.feed:
 
             post = item.post
-
             record = post.record
 
             if not isinstance(
@@ -346,31 +333,28 @@ def main():
                 continue
 
             # Geen reposts
-
             if getattr(
                 item,
-                'reason',
+                "reason",
                 None
             ) is not None:
                 continue
 
             # Geen replies
-
             if getattr(
                 record,
-                'reply',
+                "reply",
                 None
             ) is not None:
                 continue
 
             embed = getattr(
                 record,
-                'embed',
+                "embed",
                 None
             )
 
-            # Alleen foto's en video's
-
+            # Alleen originele foto's en video's
             if not isinstance(
                 embed,
                 (
@@ -382,20 +366,18 @@ def main():
 
             created = datetime.fromisoformat(
                 record.created_at.replace(
-                    'Z',
-                    '+00:00'
+                    "Z",
+                    "+00:00"
                 )
             )
 
-            # Alleen posts van minimaal 30 dagen oud
-
+            # Alleen minimaal 30 dagen oud
             if created > cutoff:
                 continue
 
             uri = post.uri
 
             # Oude publicatiegeschiedenis respecteren
-
             if uri in published:
                 continue
 
@@ -413,7 +395,7 @@ def main():
                 ):
 
                     media_key = (
-                        f'{uri}#image-{index}'
+                        f"{uri}#image-{index}"
                     )
 
                     if media_key in published:
@@ -424,7 +406,7 @@ def main():
                             created,
                             uri,
                             media_key,
-                            'image',
+                            "image",
                             image
                         )
                     )
@@ -439,7 +421,7 @@ def main():
             ):
 
                 media_key = (
-                    f'{uri}#video'
+                    f"{uri}#video"
                 )
 
                 if media_key in published:
@@ -450,7 +432,7 @@ def main():
                         created,
                         uri,
                         media_key,
-                        'video',
+                        "video",
                         embed
                     )
                 )
@@ -461,21 +443,27 @@ def main():
             break
 
     # ======================================
-    # NIEUWSTE GESCHIKTE MEDIA EERST
+    # RANDOM MEDIASELECTIE
     # ======================================
 
-    candidates.sort(
-        key=lambda item: item[0],
-        reverse=True
-    )
+    # In plaats van chronologisch selecteren
+    # worden alle gevonden geschikte media
+    # willekeurig door elkaar gehusseld.
+
+    random.shuffle(candidates)
 
     if not candidates:
 
         print(
-            'Geen nieuwe geschikte media gevonden.'
+            "Geen nieuwe geschikte media gevonden."
         )
 
         return
+
+    print(
+        f"Aantal beschikbare media: "
+        f"{len(candidates)}"
+    )
 
     count = 0
 
@@ -495,13 +483,13 @@ def main():
             break
 
         print(
-            f'Geselecteerd: {media_key}'
+            f"Random geselecteerd: {media_key}"
         )
 
         if DRY_RUN:
 
             print(
-                'DRY_RUN: media niet gepubliceerd.'
+                "DRY_RUN: media niet gepubliceerd."
             )
 
             count += 1
@@ -510,21 +498,21 @@ def main():
 
         try:
 
-            did = uri.split('/')[2]
+            did = uri.split("/")[2]
 
             # ==================================
             # ÉÉN FOTO PUBLICEREN
             # ==================================
 
-            if media_type == 'image':
+            if media_type == "image":
 
                 blob = media.image
 
                 url = (
-                    'https://bsky.social/xrpc/'
-                    'com.atproto.sync.getBlob'
-                    f'?did={did}'
-                    f'&cid={blob.ref.link}'
+                    "https://bsky.social/xrpc/"
+                    "com.atproto.sync.getBlob"
+                    f"?did={did}"
+                    f"&cid={blob.ref.link}"
                 )
 
                 raw = download(
@@ -534,7 +522,7 @@ def main():
                 if len(raw) > 1_000_000:
 
                     raise ValueError(
-                        'Afbeelding groter dan 1 MB.'
+                        "Afbeelding groter dan 1 MB."
                     )
 
                 uploaded = client.upload_blob(
@@ -542,10 +530,9 @@ def main():
                 ).blob
 
                 # Slechts één foto per post
-
                 new_image = (
                     models.AppBskyEmbedImages.Image(
-                        alt='',
+                        alt="",
                         image=uploaded,
                         aspect_ratio=media.aspect_ratio
                     )
@@ -566,10 +553,10 @@ def main():
                 blob = media.video
 
                 url = (
-                    'https://bsky.social/xrpc/'
-                    'com.atproto.sync.getBlob'
-                    f'?did={did}'
-                    f'&cid={blob.ref.link}'
+                    "https://bsky.social/xrpc/"
+                    "com.atproto.sync.getBlob"
+                    f"?did={did}"
+                    f"&cid={blob.ref.link}"
                 )
 
                 raw = download(
@@ -579,7 +566,7 @@ def main():
                 if len(raw) > 100_000_000:
 
                     raise ValueError(
-                        'Video groter dan 100 MB.'
+                        "Video groter dan 100 MB."
                     )
 
                 uploaded = client.upload_blob(
@@ -599,7 +586,7 @@ def main():
             # ==================================
 
             response = client.send_post(
-                text='',
+                text="",
                 embed=new_embed
             )
 
@@ -616,21 +603,21 @@ def main():
             count += 1
 
             print(
-                f'Gepubliceerd: {response.uri}'
+                f"Gepubliceerd: {response.uri}"
             )
 
             print(
-                f'Mediatype: {media_type}'
+                f"Mediatype: {media_type}"
             )
 
         except Exception as exc:
 
             print(
-                f'Media overgeslagen na fout: {exc}'
+                f"Media overgeslagen na fout: {exc}"
             )
 
     print(
-        f'Gepubliceerd in deze run: {count}'
+        f"Gepubliceerd in deze run: {count}"
     )
 
 
@@ -638,6 +625,6 @@ def main():
 # START SCRIPT
 # ==========================================
 
-if __name__ == '__main__':
+if __name__ == "__main__":
 
     main()
