@@ -1,6 +1,7 @@
 
 import os
 import json
+import time
 import urllib.request
 
 from datetime import datetime, timedelta, timezone
@@ -45,6 +46,12 @@ DRY_RUN = (
     os.getenv('DRY_RUN', 'false').lower() == 'true'
 )
 
+# Reboost instellingen
+
+OWN_REBOOST_COUNT = 3
+
+REBOOST_DELAY = 2
+
 
 # ==========================================
 # MEDIA DOWNLOADEN
@@ -55,7 +62,7 @@ def download(url):
     req = urllib.request.Request(
         url,
         headers={
-            'User-Agent': 'WomenWorldMediaTest/1.0'
+            'User-Agent': 'WomenWorldMedia/1.0'
         }
     )
 
@@ -99,7 +106,176 @@ def save_state(state):
 
 
 # ==========================================
-# MEDIA OPHALEN
+# REBOOST LAATSTE 3 EIGEN POSTS
+# ==========================================
+
+def reboost_own_posts(client):
+
+    print(
+        'Start reboost laatste 3 eigen posts...'
+    )
+
+    own_did = client.me.did
+
+    result = client.get_author_feed(
+        actor=own_did,
+        limit=100
+    )
+
+    own_posts = []
+
+    for item in result.feed:
+
+        post = item.post
+
+        record = post.record
+
+        # Geen reposts
+        if getattr(
+            item,
+            'reason',
+            None
+        ) is not None:
+            continue
+
+        # Alleen eigen posts
+        if post.author.did != own_did:
+            continue
+
+        # Alleen originele posts
+        if not isinstance(
+            record,
+            models.AppBskyFeedPost.Record
+        ):
+            continue
+
+        # Geen replies
+        if getattr(
+            record,
+            'reply',
+            None
+        ) is not None:
+            continue
+
+        # Geen quote-posts
+        embed = getattr(
+            record,
+            'embed',
+            None
+        )
+
+        if isinstance(
+            embed,
+            (
+                models.AppBskyEmbedRecord.Main,
+                models.AppBskyEmbedRecordWithMedia.Main
+            )
+        ):
+            continue
+
+        own_posts.append(post)
+
+        if len(own_posts) >= OWN_REBOOST_COUNT:
+            break
+
+    if not own_posts:
+
+        print(
+            'Geen eigen posts gevonden.'
+        )
+
+        return
+
+    # Oudste eerst, nieuwste als laatste
+
+    own_posts.reverse()
+
+    for post in own_posts:
+
+        try:
+
+            uri = post.uri
+
+            cid = post.cid
+
+            print(
+                f'Reboost geselecteerd: {uri}'
+            )
+
+            if DRY_RUN:
+
+                print(
+                    'DRY_RUN: reboost overgeslagen.'
+                )
+
+                continue
+
+            # Bestaande repost controleren
+
+            viewer = getattr(
+                post,
+                'viewer',
+                None
+            )
+
+            repost_uri = (
+                getattr(
+                    viewer,
+                    'repost',
+                    None
+                )
+                if viewer else None
+            )
+
+            # Eerst unrepost uitvoeren
+
+            if repost_uri:
+
+                client.delete_repost(
+                    repost_uri
+                )
+
+                print(
+                    'Unrepost uitgevoerd.'
+                )
+
+                # Twee seconden wachten
+
+                time.sleep(
+                    REBOOST_DELAY
+                )
+
+            # Opnieuw reposten
+
+            client.repost(
+                uri,
+                cid
+            )
+
+            print(
+                'Repost uitgevoerd.'
+            )
+
+            # Twee seconden tussen de posts
+
+            time.sleep(
+                REBOOST_DELAY
+            )
+
+        except Exception as exc:
+
+            print(
+                f'Reboost mislukt voor '
+                f'{post.uri}: {exc}'
+            )
+
+    print(
+        'Reboost laatste 3 eigen posts afgerond.'
+    )
+
+
+# ==========================================
+# MEDIA OPHALEN EN PUBLICEREN
 # ==========================================
 
 def main():
@@ -110,6 +286,22 @@ def main():
         TARGET,
         PASSWORD
     )
+
+    print(
+        f'Ingelogd als: {TARGET}'
+    )
+
+    # ======================================
+    # STAP 1: EERST EIGEN POSTS REBOOSTEN
+    # ======================================
+
+    reboost_own_posts(
+        client
+    )
+
+    # ======================================
+    # STAP 2: PUBLICATIEGESCHIEDENIS
+    # ======================================
 
     state = load_state()
 
@@ -123,6 +315,10 @@ def main():
     cursor = None
 
     candidates = []
+
+    print(
+        f'Media ophalen van: {SOURCE}'
+    )
 
     # ======================================
     # BRONACCOUNT DOORZOEKEN
@@ -150,6 +346,7 @@ def main():
                 continue
 
             # Geen reposts
+
             if getattr(
                 item,
                 'reason',
@@ -158,6 +355,7 @@ def main():
                 continue
 
             # Geen replies
+
             if getattr(
                 record,
                 'reply',
@@ -172,6 +370,7 @@ def main():
             )
 
             # Alleen foto's en video's
+
             if not isinstance(
                 embed,
                 (
@@ -189,18 +388,13 @@ def main():
             )
 
             # Alleen posts van minimaal 30 dagen oud
+
             if created > cutoff:
                 continue
 
             uri = post.uri
 
-            # ==================================
-            # OUDE PUBLICATIEGESCHIEDENIS
-            # ==================================
-
-            # Posts die door de vorige versie
-            # al volledig zijn gepubliceerd,
-            # worden niet opnieuw verwerkt.
+            # Oude publicatiegeschiedenis respecteren
 
             if uri in published:
                 continue
@@ -218,10 +412,10 @@ def main():
                     embed.images
                 ):
 
-                    # Unieke sleutel per foto
-                    media_key = f'{uri}#image-{index}'
+                    media_key = (
+                        f'{uri}#image-{index}'
+                    )
 
-                    # Foto al gepubliceerd?
                     if media_key in published:
                         continue
 
@@ -244,7 +438,9 @@ def main():
                 models.AppBskyEmbedVideo.Main
             ):
 
-                media_key = f'{uri}#video'
+                media_key = (
+                    f'{uri}#video'
+                )
 
                 if media_key in published:
                     continue
@@ -331,7 +527,9 @@ def main():
                     f'&cid={blob.ref.link}'
                 )
 
-                raw = download(url)
+                raw = download(
+                    url
+                )
 
                 if len(raw) > 1_000_000:
 
@@ -343,7 +541,8 @@ def main():
                     raw
                 ).blob
 
-                # Slechts één afbeelding per post
+                # Slechts één foto per post
+
                 new_image = (
                     models.AppBskyEmbedImages.Image(
                         alt='',
@@ -373,7 +572,9 @@ def main():
                     f'&cid={blob.ref.link}'
                 )
 
-                raw = download(url)
+                raw = download(
+                    url
+                )
 
                 if len(raw) > 100_000_000:
 
@@ -403,12 +604,14 @@ def main():
             )
 
             # ==================================
-            # MEDIA ALS GEPUBLICEERD OPSLAAN
+            # PUBLICATIEGESCHIEDENIS OPSLAAN
             # ==================================
 
             published[media_key] = response.uri
 
-            save_state(state)
+            save_state(
+                state
+            )
 
             count += 1
 
@@ -430,6 +633,10 @@ def main():
         f'Gepubliceerd in deze run: {count}'
     )
 
+
+# ==========================================
+# START SCRIPT
+# ==========================================
 
 if __name__ == '__main__':
 
