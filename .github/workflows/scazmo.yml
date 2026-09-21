@@ -1,0 +1,69 @@
+
+name: Scazmo Media
+
+on:
+  workflow_dispatch:
+
+  schedule:
+    - cron: '31 * * * *'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: scazmo-media
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Publish Scazmo media
+        env:
+          BSKY_USERNAME: scazmo.bsky.social
+          BSKY_PASSWORD: ${{ secrets.SCAZMO_PASSWORD }}
+
+          SOURCE_ACCOUNT: tullageback.bsky.social
+
+          STATE_FILE: scazmo_state.json
+
+          MIN_AGE_DAYS: '30'
+          MAX_PAGES: '30'
+          MAX_POSTS: '1'
+
+          DRY_RUN: 'false'
+
+        run: |
+          python scazmo_media.py
+
+      - name: Persist published history
+        if: success()
+        run: |
+          if [ -f scazmo_state.json ]; then
+
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+            git add scazmo_state.json
+
+            if ! git diff --cached --quiet; then
+              git commit -m "Update Scazmo media history"
+              git push
+            fi
+
+          fi
