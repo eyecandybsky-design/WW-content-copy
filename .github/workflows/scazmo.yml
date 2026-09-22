@@ -1,0 +1,104 @@
+
+name: Scazmo Media
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: scazmo-media
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Repository ophalen
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      # Python installeren
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # Benodigde bibliotheken installeren
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      # Scazmo-script uitvoeren
+      - name: Publish Scazmo media
+        env:
+          BSKY_USERNAME: scazmo.bsky.social
+          BSKY_PASSWORD: ${{ secrets.SCAZMO_PASSWORD }}
+
+          SOURCE_ACCOUNT: tullageback.bsky.social
+
+          STATE_FILE: scazmo_state.json
+
+          MIN_AGE_DAYS: '30'
+          MAX_PAGES: '30'
+          MAX_POSTS: '1'
+
+          DRY_RUN: 'false'
+
+        run: |
+          python scazmo_media.py
+
+      # Publicatiegeschiedenis opslaan
+      - name: Persist published history
+        if: success()
+        run: |
+          if [ -f scazmo_state.json ]; then
+
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+            # Eigen publicatiegeschiedenis bewaren
+            cp scazmo_state.json /tmp/scazmo_state.json
+
+            # Nieuwste repository ophalen
+            git fetch origin main
+            git reset --hard origin/main
+
+            # Publicatiegeschiedenis samenvoegen
+            python - <<'PY'
+          import json
+          from pathlib import Path
+
+          state_file = Path("scazmo_state.json")
+          new_file = Path("/tmp/scazmo_state.json")
+
+          current = (
+              json.loads(state_file.read_text())
+              if state_file.exists()
+              else {"published": {}}
+          )
+
+          new = json.loads(new_file.read_text())
+
+          current.setdefault("published", {}).update(
+              new.get("published", {})
+          )
+
+          state_file.write_text(
+              json.dumps(current, indent=2)
+          )
+          PY
+
+            # Wijzigingen opslaan
+            git add scazmo_state.json
+
+            if ! git diff --cached --quiet; then
+              git commit -m "Update Scazmo media history"
+              git push origin HEAD:main
+            fi
+
+          fi
