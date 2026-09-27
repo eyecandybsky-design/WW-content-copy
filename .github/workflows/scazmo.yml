@@ -29,7 +29,7 @@ jobs:
         env:
           BSKY_USERNAME: scazmo.bsky.social
           BSKY_PASSWORD: ${{ secrets.SCAZMO_PASSWORD }}
-        run: python scazmo_media_copy.py
+        run: scazmo_media.py
 
       - name: Save Scazmo media history
         run: |
