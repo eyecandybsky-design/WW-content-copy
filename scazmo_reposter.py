@@ -45,7 +45,7 @@ SKIP_ACCOUNTS = []
 #  "url": "https://bsky.app/profile/did:plc:xxxxx/feed/xxxxx",
 #  "replies": True}
 FEEDS = [
-    {"name": "Feed 1", "url": "", "replies": False},
+    {"name": "redfox", "url": "https://bsky.app/profile/did:plc:cxrt7ggxkamgzxa47cggtees/feed/aaaoirmgh53zw", "replies": False},
     {"name": "Feed 2", "url": "", "replies": False},
     {"name": "Feed 3", "url": "", "replies": False},
 ]
