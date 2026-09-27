@@ -36,7 +36,7 @@ SKIP_ACCOUNTS = []
 # Example:
 # at://did:plc:xxxxx/app.bsky.feed.generator/feedname
 FEEDS = [
-    {"uri": "", "replies": False},
+    {"uri": "https://bsky.app/profile/did:plc:cxrt7ggxkamgzxa47cggtees/feed/aaaoirmgh53zw", "replies": True},
     {"uri": "", "replies": False},
     {"uri": "", "replies": False},
 ]
