@@ -1,0 +1,42 @@
+name: Scazmo Reposter
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  repost:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Scazmo reposter
+        env:
+          BSKY_USERNAME: scazmo.bsky.social
+          BSKY_PASSWORD: ${{ secrets.SCAZMO_PASSWORD }}
+          STATE_FILE: scazmo_reposter_state.json
+        run: python scazmo_reposter.py
+
+      - name: Save Scazmo reposter state
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add scazmo_reposter_state.json
+          if ! git diff --cached --quiet; then
+            git commit -m "Update Scazmo reposter state"
+            git push
+          fi
