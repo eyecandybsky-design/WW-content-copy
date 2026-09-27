@@ -1,0 +1,56 @@
+name: Best Total Reposter - WW TEST
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: womenworld-best-total-reposter-test
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run Best Total Reposter WW TEST
+        env:
+          BSKY_USERNAME: womenworld.bsky.social
+          BSKY_PASSWORD: ${{ secrets.BSKY_PASSWORD }}
+
+          CONFIG_FILE: best_total_reposter_WW_TEST_config.json
+          STATE_FILE: best_total_reposter_WW_TEST_state.json
+
+        run: |
+          python best_total_reposter_WW_TEST.py
+
+      - name: Persist TEST state
+        if: success()
+        run: |
+          if [ -f best_total_reposter_WW_TEST_state.json ]; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+            git add best_total_reposter_WW_TEST_state.json
+
+            if ! git diff --cached --quiet; then
+              git commit -m "Update Best Total Reposter WW TEST state"
+              git push
+            fi
+          fi
