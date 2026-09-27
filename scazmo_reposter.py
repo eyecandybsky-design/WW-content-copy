@@ -43,7 +43,7 @@ FEEDS = [
 
 # Bluesky list URIs.
 LISTS = [
-    "",
+    "https://bsky.app/profile/did:plc:sp54ouue6fp2dlvn2cux54ka/lists/3mwiuwgwl6k2x",
     "",
     "",
 ]
