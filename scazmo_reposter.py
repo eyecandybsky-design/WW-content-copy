@@ -41,7 +41,7 @@ SKIP_ACCOUNTS = []
 #  "url": "https://bsky.app/profile/did:plc:xxxxx/feed/xxxxx",
 #  "replies": True}
 FEEDS = [
-    {"name": "Feed 1", "url": "", "replies": False},
+    {"Redfox": "Feed 1", "url": "https://bsky.app/profile/did:plc:cxrt7ggxkamgzxa47cggtees/feed/aaaoirmgh53zw", "replies": True},
     {"name": "Feed 2", "url": "", "replies": False},
     {"name": "Feed 3", "url": "", "replies": False},
 ]
@@ -54,7 +54,7 @@ FEEDS = [
 # {"name": "Main list",
 #  "url": "https://bsky.app/profile/did:plc:xxxxx/lists/xxxxx"}
 LISTS = [
-    {"name": "List 1", "url": ""},
+    {"example": "List 1", "url": "https://bsky.app/profile/did:plc:sp54ouue6fp2dlvn2cux54ka/lists/3mwiuwgwl6k2x"},
     {"name": "List 2", "url": ""},
     {"name": "List 3", "url": ""},
 ]
