@@ -1,0 +1,37 @@
+{
+  "account": "womenworld.bsky.social",
+  "max_per_run": 100,
+  "max_per_user": 3,
+  "lookback_hours": 3,
+  "like_lookback_hours": 6,
+  "max_likes_per_user": 10,
+  "own_posts": 3,
+  "own_posts_enabled": true,
+  "sleep_seconds": 2,
+  "feeds": [
+    {
+      "name": "RedFoxOfficial",
+      "url": "https://bsky.app/profile/did:plc:cxrt7ggxkamgzxa47cggtees/feed/aaaoirmgh53zw",
+      "enabled": true,
+      "repost": true,
+      "replies": true,
+      "likes": true
+    }
+  ],
+  "lists": [
+    {
+      "name": "Rp Always",
+      "url": "https://bsky.app/profile/did:plc:j2zyb7dcty4dcuyighzidlnb/lists/3mt7xbhdvqm2f",
+      "enabled": true,
+      "repost": true,
+      "replies": false,
+      "likes": true,
+      "one_time_reboost_hours": 8
+    }
+  ],
+  "promo5_enabled": false,
+  "promo5": [],
+  "cross_repost_enabled": false,
+  "cross_repost_sources": [],
+  "auto_content_enabled": false
+}
