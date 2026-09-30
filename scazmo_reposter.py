@@ -58,7 +58,7 @@ FEEDS = [
 # {"name": "Main list",
 #  "url": "https://bsky.app/profile/did:plc:xxxxx/lists/xxxxx"}
 LISTS = [
-    {"name": "List reposters", "url": "https://bsky.app/profile/did:plc:sp54ouue6fp2dlvn2cux54ka/lists/3mwiuwgwl6k2x"},
+    {"name": "List reposters", "url": "https://bsky.app/profile/did:plc:gfyttb6vys3hzp2o2x46uqv3/lists/3mwr2f5sh2f2i"},
     {"name": "List 2", "url": ""},
     {"name": "List 3", "url": ""},
 ]
