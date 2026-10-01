@@ -60,7 +60,7 @@ FEEDS = [
 LISTS = [
     {"name": "List scazmo", "url": "https://bsky.app/profile/did:plc:gfyttb6vys3hzp2o2x46uqv3/lists/3mwr2f5sh2f2i"},
     {"name": "list Tullage", "url": "https://bsky.app/profile/did:plc:bhyo6qnbgtz3u5ggui7ovvro/lists/3mwr24qjefa2f"},
-    {"name": "List 3", "url": ""},
+    {"name": "List tullage2", "url": "https://bsky.app/profile/did:plc:bhyo6qnbgtz3u5ggui7ovvro/lists/3mwtqhvr6uw2q"},
 ]
 
 # Handles that should also be scanned as direct sources.
