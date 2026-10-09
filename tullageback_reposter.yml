@@ -1,0 +1,50 @@
+name: Tullageback Reposter
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Every 3 hours, at minute 1
+    - cron: "1 */3 * * *"
+
+jobs:
+  repost:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install atproto
+
+      - name: Run Tullageback reposter
+        env:
+          BSKY_USERNAME: tullageback.bsky.social
+          BSKY_PASSWORD: ${{ secrets.TULLAGEBACK_PASSWORD }}
+          STATE_FILE: tullageback_reposter_state.json
+        run: |
+          python tullageback_reposter.py
+
+      - name: Save repost state
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add tullageback_reposter_state.json
+
+          if git diff --cached --quiet; then
+            echo "No state changes to commit."
+          else
+            git commit -m "Update Tullageback repost state"
+            git push
+          fi
