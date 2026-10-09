@@ -2,9 +2,6 @@ name: Tullageback Reposter
 
 on:
   workflow_dispatch:
-  schedule:
-    # Every 3 hours, at minute 1
-    - cron: "1 */3 * * *"
 
 jobs:
   repost:
