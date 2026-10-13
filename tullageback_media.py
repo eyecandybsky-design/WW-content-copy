@@ -1,468 +1,632 @@
 
-import json
 import os
-import random
+import json
 import time
+import random
+import urllib.request
+
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from urllib.parse import urlencode
 
-import requests
 from atproto import Client, models
 
 
-# ============================================================
-# CONFIGURATIE
-# ============================================================
+# ==========================================
+# INSTELLINGEN
+# ==========================================
 
-SOURCE_ACCOUNT = os.getenv(
+SOURCE = os.getenv(
     "SOURCE_ACCOUNT",
     "eyescandy.bsky.social"
-)
+).lstrip("@")
 
-TARGET_ACCOUNT = os.getenv(
+TARGET = os.getenv(
     "BSKY_USERNAME",
     "tullageback.bsky.social"
+).lstrip("@")
+
+PASSWORD = os.environ["BSKY_PASSWORD"]
+
+STATE = Path(
+    os.getenv(
+        "STATE_FILE",
+        "tullageback_media_state.json"
+    )
 )
 
-PASSWORD = os.getenv("BSKY_PASSWORD")
-
-STATE_FILE = Path(
-    os.getenv("STATE_FILE", "tullageback_media_state.json")
+# Alleen media van minimaal 30 dagen oud
+MIN_AGE_DAYS = int(
+    os.getenv("MIN_AGE_DAYS", "30")
 )
 
-MIN_AGE_DAYS = int(os.getenv("MIN_AGE_DAYS", "30"))
-MAX_PAGES = int(os.getenv("MAX_PAGES", "20"))
-MAX_CANDIDATES = int(os.getenv("MAX_CANDIDATES", "500"))
+# Maximaal aantal bronpagina's doorzoeken
+MAX_PAGES = int(
+    os.getenv("MAX_PAGES", "30")
+)
 
-SLEEP_SECONDS = 2
-MAX_VIDEO_BYTES = 45 * 1024 * 1024
+# Maximaal aantal nieuwe mediaposts per run
+MAX_POSTS = int(
+    os.getenv("MAX_POSTS", "1")
+)
 
-API_BASE = "https://bsky.social/xrpc"
+DRY_RUN = (
+    os.getenv("DRY_RUN", "false").lower()
+    == "true"
+)
+
+# Reboost instellingen
+OWN_REBOOST_COUNT = 3
+REBOOST_DELAY = 2
 
 
-# ============================================================
-# STATE
-# ============================================================
+# ==========================================
+# MEDIA DOWNLOADEN
+# ==========================================
+
+def download(url):
+
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "TullagebackMedia/1.0"
+        }
+    )
+
+    with urllib.request.urlopen(
+        req,
+        timeout=90
+    ) as resp:
+
+        return resp.read()
+
+
+# ==========================================
+# PUBLICATIEGESCHIEDENIS
+# ==========================================
 
 def load_state():
-    if not STATE_FILE.exists():
-        return {"posted_uris": []}
 
-    try:
-        with STATE_FILE.open("r", encoding="utf-8") as file:
-            state = json.load(file)
+    if STATE.exists():
 
-        if not isinstance(state, dict):
-            return {"posted_uris": []}
+        state = json.loads(
+            STATE.read_text(encoding="utf-8")
+        )
 
-        state.setdefault("posted_uris", [])
-        return state
+    else:
 
-    except (OSError, json.JSONDecodeError):
-        print("⚠️ Statebestand kon niet worden gelezen.")
-        raise
+        state = {"published": {}}
+
+    state.setdefault("published", {})
+
+    return state
 
 
 def save_state(state):
-    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
 
-    temporary_file = STATE_FILE.with_suffix(".tmp")
-
-    with temporary_file.open("w", encoding="utf-8") as file:
-        json.dump(state, file, indent=2, ensure_ascii=False)
-
-    temporary_file.replace(STATE_FILE)
-
-
-# ============================================================
-# HELPERS
-# ============================================================
-
-def parse_datetime(value):
-    if not value:
-        return None
-
-    try:
-        result = datetime.fromisoformat(
-            value.replace("Z", "+00:00")
-        )
-
-        if result.tzinfo is None:
-            result = result.replace(tzinfo=timezone.utc)
-
-        return result.astimezone(timezone.utc)
-
-    except (ValueError, TypeError):
-        return None
-
-
-def get_blob_cid(blob):
-    """Haal de CID uit een AT Protocol blob-object."""
-
-    if blob is None:
-        return None
-
-    cid = getattr(blob, "cid", None)
-    if cid:
-        return str(cid)
-
-    ref = getattr(blob, "ref", None)
-
-    if isinstance(ref, dict):
-        return ref.get("$link")
-
-    if ref is not None:
-        link = getattr(ref, "link", None)
-        if link:
-            return str(link)
-
-    if isinstance(blob, dict):
-        ref = blob.get("ref", {})
-        if isinstance(ref, dict):
-            return ref.get("$link")
-
-    return None
-
-
-def download_image(url):
-    response = requests.get(url, timeout=45)
-    response.raise_for_status()
-
-    content_type = response.headers.get(
-        "Content-Type", ""
-    ).split(";")[0].lower()
-
-    if not content_type.startswith("image/"):
-        raise ValueError(
-            f"Geen geldig afbeeldingsbestand: {content_type}"
-        )
-
-    return response.content
-
-
-def download_video(source_did, video_blob):
-    cid = get_blob_cid(video_blob)
-
-    if not cid:
-        raise ValueError("Geen videoblob-CID gevonden.")
-
-    url = (
-        f"{API_BASE}/com.atproto.sync.getBlob?"
-        + urlencode({"did": source_did, "cid": cid})
-    )
-
-    response = requests.get(url, timeout=120)
-    response.raise_for_status()
-
-    content = response.content
-
-    if not content:
-        raise ValueError("Het videobestand is leeg.")
-
-    if len(content) > MAX_VIDEO_BYTES:
-        raise ValueError(
-            "Video is groter dan de ingestelde limiet van 45 MB."
-        )
-
-    content_type = response.headers.get(
-        "Content-Type", ""
-    ).split(";")[0].lower()
-
-    if content_type and not (
-        content_type.startswith("video/")
-        or content_type == "application/octet-stream"
-    ):
-        raise ValueError(
-            f"Onverwacht videotype: {content_type}"
-        )
-
-    return content
-
-
-def get_media_type(post_view, record):
-    """
-    Retourneert image of video.
-    Carrousels en posts zonder ondersteunde media worden overgeslagen.
-    """
-
-    view_embed = getattr(post_view, "embed", None)
-    record_embed = getattr(record, "embed", None)
-
-    if view_embed is None or record_embed is None:
-        return None
-
-    # Video
-    playlist = getattr(view_embed, "playlist", None)
-    raw_video = getattr(record_embed, "video", None)
-
-    if playlist and raw_video is not None:
-        return {
-            "type": "video",
-            "blob": raw_video,
-            "alt": getattr(record_embed, "alt", "") or "",
-            "aspect_ratio": getattr(
-                record_embed, "aspect_ratio", None
-            ),
-        }
-
-    # Afbeeldingen: alleen exact één afbeelding.
-    view_images = getattr(view_embed, "images", None)
-    raw_images = getattr(record_embed, "images", None)
-
-    if view_images is not None and raw_images is not None:
-        if len(view_images) != 1 or len(raw_images) != 1:
-            return None
-
-        image_view = view_images[0]
-        image_record = raw_images[0]
-
-        return {
-            "type": "image",
-            "url": getattr(image_view, "fullsize", None),
-            "alt": getattr(image_record, "alt", "") or "",
-            "aspect_ratio": getattr(
-                image_view, "aspect_ratio", None
-            ),
-        }
-
-    return None
-
-
-def make_aspect_ratio(value):
-    if value is None:
-        return None
-
-    width = getattr(value, "width", None)
-    height = getattr(value, "height", None)
-
-    if not width or not height:
-        return None
-
-    return models.AppBskyEmbedDefs.AspectRatio(
-        width=int(width),
-        height=int(height),
+    STATE.write_text(
+        json.dumps(
+            state,
+            indent=2
+        ),
+        encoding="utf-8"
     )
 
 
-def create_media_post(client, source_post, media):
-    """Plaats uitsluitend de media, zonder caption of bronposttekst."""
+# ==========================================
+# REBOOST LAATSTE 3 EIGEN POSTS
+# ==========================================
 
-    if media["type"] == "image":
-        if not media.get("url"):
-            raise ValueError("Geen afbeeldings-URL beschikbaar.")
+def reboost_own_posts(client):
 
-        image_data = download_image(media["url"])
-        uploaded = client.upload_blob(image_data)
-
-        image = models.AppBskyEmbedImages.Image(
-            image=uploaded.blob,
-            alt=media["alt"],
-            aspect_ratio=make_aspect_ratio(
-                media.get("aspect_ratio")
-            ),
-        )
-
-        embed = models.AppBskyEmbedImages.Main(
-            images=[image]
-        )
-
-        return client.send_post(text="", embed=embed)
-
-    if media["type"] == "video":
-        source_did = source_post.author.did
-
-        video_data = download_video(
-            source_did,
-            media["blob"]
-        )
-
-        uploaded = client.upload_blob(video_data)
-
-        embed = models.AppBskyEmbedVideo.Main(
-            video=uploaded.blob,
-            alt=media["alt"],
-            aspect_ratio=make_aspect_ratio(
-                media.get("aspect_ratio")
-            ),
-        )
-
-        return client.send_post(text="", embed=embed)
-
-    raise ValueError("Niet-ondersteund mediatype.")
-
-
-# ============================================================
-# BRONPOSTS OPHALEN
-# ============================================================
-
-def find_candidates(client, state):
-    cutoff = datetime.now(timezone.utc) - timedelta(
-        days=MIN_AGE_DAYS
+    print(
+        "Start reboost laatste 3 eigen posts..."
     )
 
-    already_posted = set(state["posted_uris"])
-    candidates = []
-    cursor = None
+    own_did = client.me.did
 
-    for page in range(MAX_PAGES):
-        params = {
-            "actor": SOURCE_ACCOUNT,
-            "limit": 100,
-            "filter": "posts_no_replies",
-        }
+    result = client.get_author_feed(
+        actor=own_did,
+        limit=100
+    )
 
-        if cursor:
-            params["cursor"] = cursor
+    own_posts = []
 
-        response = client.app.bsky.feed.get_author_feed(
-            params=params
+    for item in result.feed:
+
+        post = item.post
+        record = post.record
+
+        # Geen reposts
+        if getattr(
+            item,
+            "reason",
+            None
+        ) is not None:
+            continue
+
+        # Alleen eigen posts
+        if post.author.did != own_did:
+            continue
+
+        # Alleen originele posts
+        if not isinstance(
+            record,
+            models.AppBskyFeedPost.Record
+        ):
+            continue
+
+        # Geen replies
+        if getattr(
+            record,
+            "reply",
+            None
+        ) is not None:
+            continue
+
+        # Geen quote-posts
+        embed = getattr(
+            record,
+            "embed",
+            None
         )
 
-        feed = response.feed or []
+        if isinstance(
+            embed,
+            (
+                models.AppBskyEmbedRecord.Main,
+                models.AppBskyEmbedRecordWithMedia.Main
+            )
+        ):
+            continue
 
-        if not feed:
+        own_posts.append(post)
+
+        if len(own_posts) >= OWN_REBOOST_COUNT:
             break
 
-        reached_cutoff = False
+    # Oudste eerst, nieuwste als laatste
+    own_posts.reverse()
 
-        for item in feed:
-            # Alleen originele posts, geen reposts.
-            if getattr(item, "reason", None) is not None:
+    for post in own_posts:
+
+        try:
+
+            uri = post.uri
+            cid = post.cid
+
+            print(
+                f"Reboost geselecteerd: {uri}"
+            )
+
+            if DRY_RUN:
+
+                print(
+                    "DRY_RUN: reboost overgeslagen."
+                )
+
                 continue
+
+            viewer = getattr(
+                post,
+                "viewer",
+                None
+            )
+
+            repost_uri = (
+                getattr(
+                    viewer,
+                    "repost",
+                    None
+                )
+                if viewer else None
+            )
+
+            # Eerst unrepost uitvoeren
+            if repost_uri:
+
+                client.delete_repost(
+                    repost_uri
+                )
+
+                print(
+                    "Unrepost uitgevoerd."
+                )
+
+                time.sleep(
+                    REBOOST_DELAY
+                )
+
+            # Daarna opnieuw reposten
+            client.repost(
+                uri,
+                cid
+            )
+
+            print(
+                "Repost uitgevoerd."
+            )
+
+            time.sleep(
+                REBOOST_DELAY
+            )
+
+        except Exception as exc:
+
+            print(
+                f"Reboost mislukt voor "
+                f"{post.uri}: {exc}"
+            )
+
+    print(
+        "Reboost laatste 3 eigen posts afgerond."
+    )
+
+
+# ==========================================
+# MEDIA OPHALEN EN PUBLICEREN
+# ==========================================
+
+def main():
+
+    client = Client()
+
+    client.login(
+        TARGET,
+        PASSWORD
+    )
+
+    print(
+        f"Ingelogd als: {TARGET}"
+    )
+
+    # ======================================
+    # STAP 1: EERST EIGEN POSTS REBOOSTEN
+    # ======================================
+
+    reboost_own_posts(client)
+
+    # ======================================
+    # STAP 2: PUBLICATIEGESCHIEDENIS
+    # ======================================
+
+    state = load_state()
+
+    published = state["published"]
+
+    cutoff = (
+        datetime.now(timezone.utc)
+        - timedelta(days=MIN_AGE_DAYS)
+    )
+
+    cursor = None
+
+    candidates = []
+
+    print(
+        f"Media ophalen van: {SOURCE}"
+    )
+
+    # ======================================
+    # BRONACCOUNT DOORZOEKEN
+    # ======================================
+
+    for page in range(MAX_PAGES):
+
+        result = client.get_author_feed(
+            actor=SOURCE,
+            limit=100,
+            cursor=cursor,
+            filter="posts_with_media"
+        )
+
+        print(
+            f"Bronpagina {page + 1}: "
+            f"{len(result.feed)} posts opgehaald."
+        )
+
+        for item in result.feed:
 
             post = item.post
             record = post.record
 
-            # Extra controle: geen antwoorden.
-            if getattr(record, "reply", None) is not None:
+            if not isinstance(
+                record,
+                models.AppBskyFeedPost.Record
+            ):
                 continue
 
-            created_at = parse_datetime(
-                getattr(record, "created_at", None)
+            # Geen reposts
+            if getattr(
+                item,
+                "reason",
+                None
+            ) is not None:
+                continue
+
+            # Geen replies
+            if getattr(
+                record,
+                "reply",
+                None
+            ) is not None:
+                continue
+
+            embed = getattr(
+                record,
+                "embed",
+                None
             )
 
-            if created_at is None:
+            # Alleen originele foto's en video's
+            if not isinstance(
+                embed,
+                (
+                    models.AppBskyEmbedImages.Main,
+                    models.AppBskyEmbedVideo.Main
+                )
+            ):
                 continue
 
-            if created_at > cutoff:
+            created = datetime.fromisoformat(
+                record.created_at.replace(
+                    "Z",
+                    "+00:00"
+                )
+            )
+
+            # Alleen minimaal 30 dagen oud
+            if created > cutoff:
                 continue
 
-            reached_cutoff = True
+            uri = post.uri
 
-            if post.uri in already_posted:
+            # Oude publicatiegeschiedenis respecteren
+            if uri in published:
                 continue
 
-            media = get_media_type(post, record)
+            # ==================================
+            # FOTO'S AFZONDERLIJK TOEVOEGEN
+            # ==================================
 
-            if media is None:
-                continue
+            if isinstance(
+                embed,
+                models.AppBskyEmbedImages.Main
+            ):
 
-            candidates.append({
-                "post": post,
-                "media": media,
-                "created_at": created_at,
-            })
+                for index, image in enumerate(
+                    embed.images
+                ):
 
-            if len(candidates) >= MAX_CANDIDATES:
-                break
+                    media_key = (
+                        f"{uri}#image-{index}"
+                    )
 
-        print(
-            f"📄 Pagina {page + 1}: "
-            f"{len(candidates)} geschikte kandidaten gevonden."
-        )
+                    if media_key in published:
+                        continue
 
-        if len(candidates) >= MAX_CANDIDATES:
-            break
+                    candidates.append(
+                        (
+                            created,
+                            uri,
+                            media_key,
+                            "image",
+                            image
+                        )
+                    )
 
-        # De feed loopt van nieuw naar oud.
-        if reached_cutoff:
-            break
+            # ==================================
+            # VIDEO TOEVOEGEN
+            # ==================================
 
-        cursor = getattr(response, "cursor", None)
+            elif isinstance(
+                embed,
+                models.AppBskyEmbedVideo.Main
+            ):
+
+                media_key = (
+                    f"{uri}#video"
+                )
+
+                if media_key in published:
+                    continue
+
+                candidates.append(
+                    (
+                        created,
+                        uri,
+                        media_key,
+                        "video",
+                        embed
+                    )
+                )
+
+        cursor = result.cursor
 
         if not cursor:
             break
 
-    return candidates
+    # ======================================
+    # RANDOM MEDIASELECTIE
+    # ======================================
 
-
-# ============================================================
-# HOOFDPROGRAMMA
-# ============================================================
-
-def main():
-    if not PASSWORD:
-        raise RuntimeError(
-            "BSKY_PASSWORD ontbreekt in GitHub Secrets."
-        )
-
-    print("=" * 55)
-    print("TULLAGEBACK RANDOM MEDIA AUTOPOST")
-    print("=" * 55)
-    print(f"Bron: {SOURCE_ACCOUNT}")
-    print(f"Doel: {TARGET_ACCOUNT}")
-    print(f"Minimale leeftijd: {MIN_AGE_DAYS} dagen")
-
-    state = load_state()
-
-    client = Client()
-    client.login(TARGET_ACCOUNT, PASSWORD)
-
-    print("✅ Ingelogd op het doelaccount.")
-
-    candidates = find_candidates(client, state)
-
-    if not candidates:
-        print("ℹ️ Geen nieuwe geschikte media gevonden.")
-        return
-
-    # Willekeurige keuze uit alle gevonden geschikte kandidaten.
     random.shuffle(candidates)
 
-    for candidate in candidates:
-        source_post = candidate["post"]
-        source_uri = source_post.uri
+    if not candidates:
+
+        print(
+            "Geen nieuwe geschikte media gevonden."
+        )
+
+        return
+
+    print(
+        f"Aantal beschikbare media: "
+        f"{len(candidates)}"
+    )
+
+    count = 0
+
+    # ======================================
+    # MEDIA PUBLICEREN
+    # ======================================
+
+    for (
+        created,
+        uri,
+        media_key,
+        media_type,
+        media
+    ) in candidates:
+
+        if count >= MAX_POSTS:
+            break
+
+        print(
+            f"Random geselecteerd: {media_key}"
+        )
+
+        print(
+            f"Datum bronpost: {created.isoformat()}"
+        )
+
+        if DRY_RUN:
+
+            print(
+                "DRY_RUN: media niet gepubliceerd."
+            )
+
+            count += 1
+
+            continue
 
         try:
+
+            did = uri.split("/")[2]
+
+            # ==================================
+            # ÉÉN FOTO PUBLICEREN
+            # ==================================
+
+            if media_type == "image":
+
+                blob = media.image
+
+                url = (
+                    "https://bsky.social/xrpc/"
+                    "com.atproto.sync.getBlob"
+                    f"?did={did}"
+                    f"&cid={blob.ref.link}"
+                )
+
+                raw = download(
+                    url
+                )
+
+                if len(raw) > 1_000_000:
+
+                    raise ValueError(
+                        "Afbeelding groter dan 1 MB."
+                    )
+
+                uploaded = client.upload_blob(
+                    raw
+                ).blob
+
+                new_image = (
+                    models.AppBskyEmbedImages.Image(
+                        alt="",
+                        image=uploaded,
+                        aspect_ratio=media.aspect_ratio
+                    )
+                )
+
+                new_embed = (
+                    models.AppBskyEmbedImages.Main(
+                        images=[new_image]
+                    )
+                )
+
+            # ==================================
+            # ÉÉN VIDEO PUBLICEREN
+            # ==================================
+
+            else:
+
+                blob = media.video
+
+                url = (
+                    "https://bsky.social/xrpc/"
+                    "com.atproto.sync.getBlob"
+                    f"?did={did}"
+                    f"&cid={blob.ref.link}"
+                )
+
+                raw = download(
+                    url
+                )
+
+                if len(raw) > 100_000_000:
+
+                    raise ValueError(
+                        "Video groter dan 100 MB."
+                    )
+
+                uploaded = client.upload_blob(
+                    raw
+                ).blob
+
+                new_embed = (
+                    models.AppBskyEmbedVideo.Main(
+                        video=uploaded,
+                        aspect_ratio=media.aspect_ratio,
+                        alt=None
+                    )
+                )
+
+            # ==================================
+            # PUBLICEREN ZONDER CAPTION
+            # ==================================
+
+            response = client.send_post(
+                text="",
+                embed=new_embed
+            )
+
+            # ==================================
+            # PUBLICATIEGESCHIEDENIS OPSLAAN
+            # ==================================
+
+            published[media_key] = response.uri
+
+            save_state(
+                state
+            )
+
+            count += 1
+
             print(
-                "🎲 Gekozen bronpost: "
-                f"{source_uri}"
+                f"Gepubliceerd: {response.uri}"
             )
+
             print(
-                "📅 Bronpostdatum: "
-                f"{candidate['created_at'].isoformat()}"
+                f"Mediatype: {media_type}"
             )
+
+        except Exception as exc:
+
             print(
-                f"🖼️ Mediatype: {candidate['media']['type']}"
+                f"Media overgeslagen na fout: {exc}"
             )
 
-            create_media_post(
-                client,
-                source_post,
-                candidate["media"],
-            )
+    print(
+        f"Gepubliceerd in deze run: {count}"
+    )
 
-            # Alleen als publiceren is gelukt opslaan als verwerkt.
-            state["posted_uris"].append(source_uri)
-            state["posted_uris"] = list(
-                dict.fromkeys(state["posted_uris"])
-            )
 
-            save_state(state)
-
-            print("✅ Media succesvol gepubliceerd.")
-            print("🔒 Bronpost geregistreerd tegen duplicaten.")
-            return
-
-        except Exception as error:
-            print(
-                f"⚠️ Deze kandidaat is overgeslagen: {error}"
-            )
-            time.sleep(SLEEP_SECONDS)
-
-    print("❌ Geen van de geselecteerde kandidaten kon worden geplaatst.")
-
+# ==========================================
+# START SCRIPT
+# ==========================================
 
 if __name__ == "__main__":
+
     main()
