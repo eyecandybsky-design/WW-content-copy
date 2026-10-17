@@ -12,55 +12,51 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  backup-autopost:
+  publish:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          persist-credentials: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install atproto
+          pip install -r requirements.txt
 
-      - name: Run KnightTakesQueen backup
+      - name: Publish old media posts
         env:
-          SOURCE_ACCOUNT: thepriapicknave.bsky.social
           BSKY_USERNAME: knighttakesqueen.bsky.social
           BSKY_PASSWORD: ${{ secrets.KNIGHTTAKESQUEEN_PASSWORD }}
+
+          SOURCE_ACCOUNT: thepriapicknave.bsky.social
+
           STATE_FILE: knighttakesqueen_state.json
-          MIN_AGE_DAYS: "30"
-          MAX_PAGES: "30"
-          MAX_POSTS: "3"
-        run: python knighttakesqueen_media.py
 
-      - name: Save state file
-        if: always()
+          MIN_AGE_DAYS: '30'
+          MAX_PAGES: '30'
+          MAX_POSTS: '3'
+
         run: |
-          if [ ! -f knighttakesqueen_state.json ]; then
-            echo '{"published": {}}' > knighttakesqueen_state.json
+          python knighttakesqueen_media.py
+
+      - name: Persist published history
+        if: success()
+        run: |
+          if [ -f knighttakesqueen_state.json ]; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+            git add knighttakesqueen_state.json
+
+            if ! git diff --cached --quiet; then
+              git commit -m "Update KnightTakesQueen media history"
+              git push
+            fi
           fi
-
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          git add knighttakesqueen_state.json
-
-          if git diff --cached --quiet; then
-            echo "No state changes to commit."
-            exit 0
-          fi
-
-          git commit -m "Update KnightTakesQueen backup state"
-
-          git fetch origin main
-          git pull --rebase origin main
-          git push origin HEAD:main
