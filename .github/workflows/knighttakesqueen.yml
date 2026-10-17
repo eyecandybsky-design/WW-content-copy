@@ -40,7 +40,7 @@ jobs:
           STATE_FILE: knighttakesqueen_state.json
 
           MIN_AGE_DAYS: '30'
-          MAX_PAGES: '30'
+          MAX_PAGES: '100'
           MAX_POSTS: '3'
 
         run: |
