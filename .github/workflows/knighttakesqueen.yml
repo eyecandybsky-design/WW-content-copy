@@ -40,14 +40,13 @@ jobs:
           MIN_AGE_DAYS: "30"
           MAX_PAGES: "30"
           MAX_POSTS: "3"
-          DRY_RUN: "true"
         run: python knighttakesqueen_media.py
 
       - name: Ensure state file exists
         if: always()
         run: |
           if [ ! -f knighttakesqueen_state.json ]; then
-            printf '{\n  "published": {},\n  "series_progress": {}\n}\n' > knighttakesqueen_state.json
+            printf '{\n  "published": {}\n}\n' > knighttakesqueen_state.json
           fi
 
       - name: Save state file
