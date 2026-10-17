@@ -1,1 +1,70 @@
-1
+
+name: KnightTakesQueen Backup Autopost
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: knighttakesqueen-backup
+  cancel-in-progress: false
+
+jobs:
+  backup-autopost:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install atproto
+
+      - name: Run KnightTakesQueen backup
+        env:
+          SOURCE_ACCOUNT: thepriapicknave.bsky.social
+          BSKY_USERNAME: knighttakesqueen.bsky.social
+          BSKY_PASSWORD: ${{ secrets.KNIGHTTAKESQUEEN_PASSWORD }}
+          STATE_FILE: knighttakesqueen_state.json
+          MIN_AGE_DAYS: "30"
+          MAX_PAGES: "30"
+          MAX_POSTS: "3"
+          DRY_RUN: "true"
+        run: python knighttakesqueen_media.py
+
+      - name: Ensure state file exists
+        if: always()
+        run: |
+          if [ ! -f knighttakesqueen_state.json ]; then
+            printf '{\n  "published": {},\n  "series_progress": {}\n}\n' > knighttakesqueen_state.json
+          fi
+
+      - name: Save state file
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add knighttakesqueen_state.json
+
+          if git diff --cached --quiet; then
+            echo "No state changes to commit."
+            exit 0
+          fi
+
+          git commit -m "Update KnightTakesQueen backup state"
+
+          git fetch origin main
+          git pull --rebase origin main
+          git push origin HEAD:main
