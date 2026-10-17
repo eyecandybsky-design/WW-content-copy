@@ -1,516 +1,560 @@
 
 import os
+import re
 import json
 import time
 import random
-from pathlib import Path
+import urllib.request
+
 from datetime import datetime, timedelta, timezone
-from urllib.request import Request, urlopen
+from pathlib import Path
+from urllib.parse import urlencode
 
 from atproto import Client, models
 
 
 # ============================================================
-# KNIGHTTAKESQUEEN BACKUP AUTOPOST
+# KNIGHTTAKESQUEEN MEDIA AUTOPOST
+# Gebaseerd op het werkende Scazmo-script
 # ============================================================
 
 SOURCE = os.getenv(
     "SOURCE_ACCOUNT",
-    "thepriapicknave.bsky.social",
-)
+    "thepriapicknave.bsky.social"
+).lstrip("@")
 
 TARGET = os.getenv(
     "BSKY_USERNAME",
-    "knighttakesqueen.bsky.social",
-)
+    "knighttakesqueen.bsky.social"
+).lstrip("@")
 
 PASSWORD = os.environ["BSKY_PASSWORD"]
 
-STATE_FILE = Path(
+STATE = Path(
     os.getenv(
         "STATE_FILE",
-        "knighttakesqueen_state.json",
+        "knighttakesqueen_state.json"
     )
 )
 
-MIN_AGE_DAYS = int(os.getenv("MIN_AGE_DAYS", "30"))
-MAX_PAGES = int(os.getenv("MAX_PAGES", "30"))
-MAX_POSTS = int(os.getenv("MAX_POSTS", "3"))
+MIN_AGE_DAYS = int(
+    os.getenv("MIN_AGE_DAYS", "30")
+)
 
-DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
+MAX_PAGES = int(
+    os.getenv("MAX_PAGES", "30")
+)
+
+MAX_POSTS = int(
+    os.getenv("MAX_POSTS", "3")
+)
+
+DRY_RUN = (
+    os.getenv("DRY_RUN", "true").lower()
+    == "true"
+)
 
 SLEEP_SECONDS = 2
+
 REDFOX_HANDLE = "redfoxofficial.bsky.social"
+
+REDFOX_PATTERN = re.compile(
+    r"(?<![\w@])@redfoxofficial\.bsky\.social"
+    r"(?![\w.-])",
+    re.IGNORECASE
+)
 
 
 # ============================================================
-# STATE
+# MEDIA DOWNLOADEN
+# ============================================================
+
+def download(url):
+
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "KnightTakesQueenMedia/1.0"
+        }
+    )
+
+    with urllib.request.urlopen(
+        request,
+        timeout=90
+    ) as response:
+
+        return response.read()
+
+
+def blob_url(uri, blob):
+
+    did = uri.split("/")[2]
+
+    query = urlencode({
+        "did": did,
+        "cid": blob.ref.link
+    })
+
+    return (
+        "https://bsky.social/xrpc/"
+        "com.atproto.sync.getBlob?"
+        + query
+    )
+
+
+# ============================================================
+# PUBLICATIEGESCHIEDENIS
 # ============================================================
 
 def load_state():
-    if not STATE_FILE.exists():
-        return {
-            "published": {},
-            "series_progress": {},
-        }
 
-    try:
-        with STATE_FILE.open("r", encoding="utf-8") as f:
-            state = json.load(f)
-    except (OSError, json.JSONDecodeError):
+    if STATE.exists():
+
+        try:
+            state = json.loads(
+                STATE.read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError):
+            print("⚠️ Statebestand ongeldig; nieuwe geschiedenis gestart.")
+            state = {}
+
+    else:
         state = {}
 
     state.setdefault("published", {})
-    state.setdefault("series_progress", {})
+
     return state
 
 
 def save_state(state):
-    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    temporary = STATE_FILE.with_suffix(".tmp")
 
-    with temporary.open("w", encoding="utf-8") as f:
-        json.dump(state, f, indent=2, ensure_ascii=False)
+    STATE.parent.mkdir(
+        parents=True,
+        exist_ok=True
+    )
 
-    temporary.replace(STATE_FILE)
+    temporary = STATE.with_suffix(".tmp")
+
+    temporary.write_text(
+        json.dumps(
+            state,
+            indent=2,
+            ensure_ascii=False
+        ),
+        encoding="utf-8"
+    )
+
+    temporary.replace(STATE)
 
 
 # ============================================================
-# DATES AND BLUESKY HELPERS
+# REDFOX MENTION
 # ============================================================
 
-def parse_datetime(value):
+def get_redfox_did(client):
+
+    try:
+
+        profile = client.get_profile(
+            actor=REDFOX_HANDLE
+        )
+
+        return profile.did
+
+    except Exception as error:
+
+        print(
+            f"⚠️ RedFox-account niet gevonden: {error}"
+        )
+
+        return None
+
+
+def make_redfox_facets(text, redfox_did):
+
+    if not redfox_did:
+        return None
+
+    mention = "@" + REDFOX_HANDLE
+
+    position = text.encode("utf-8").find(
+        mention.encode("utf-8")
+    )
+
+    if position < 0:
+        return None
+
+    byte_start = position
+
+    byte_end = (
+        byte_start
+        + len(mention.encode("utf-8"))
+    )
+
+    facet = models.AppBskyRichtextFacet.Main(
+        index=models.AppBskyRichtextFacet.ByteSlice(
+            byte_start=byte_start,
+            byte_end=byte_end
+        ),
+        features=[
+            models.AppBskyRichtextFacet.Mention(
+                did=redfox_did
+            )
+        ]
+    )
+
+    return [facet]
+
+
+def make_caption(client, original_text):
+
+    original_text = original_text or ""
+
+    if not REDFOX_PATTERN.search(original_text):
+
+        return "", None
+
+    print(
+        "❣️ RedFox gevonden in de originele bronpost."
+    )
+
+    redfox_did = get_redfox_did(client)
+
+    caption = "👉🏻 @" + REDFOX_HANDLE
+
+    facets = make_redfox_facets(
+        caption,
+        redfox_did
+    )
+
+    return caption, facets
+
+
+# ============================================================
+# DATUM EN MEDIA HELPERS
+# ============================================================
+
+def parse_created_at(value):
+
     if not value:
         return None
 
     try:
+
         result = datetime.fromisoformat(
             value.replace("Z", "+00:00")
         )
 
         if result.tzinfo is None:
-            result = result.replace(tzinfo=timezone.utc)
+            result = result.replace(
+                tzinfo=timezone.utc
+            )
 
         return result.astimezone(timezone.utc)
 
     except (ValueError, TypeError):
+
         return None
 
 
-def get_record(post):
-    return getattr(post, "record", None)
+def get_media_blob_cid(blob):
 
-
-def get_created_at(post):
-    record = get_record(post)
-    return parse_datetime(
-        getattr(record, "created_at", None)
-    )
-
-
-def get_reply_root_uri(post):
-    record = get_record(post)
-    reply = getattr(record, "reply", None)
-    root = getattr(reply, "root", None)
-
-    return getattr(root, "uri", None)
-
-
-def get_media_type(embed):
-    if isinstance(embed, models.AppBskyEmbedImages.Main):
-        return "images"
-
-    if isinstance(embed, models.AppBskyEmbedVideo.Main):
-        return "video"
-
-    return None
-
-
-def get_blob_bytes(did, cid):
-    url = (
-        "https://bsky.social/xrpc/"
-        "com.atproto.sync.getBlob"
-        f"?did={did}&cid={cid}"
-    )
-
-    request = Request(
-        url,
-        headers={"User-Agent": "KnightTakesQueenBackup/1.0"},
-    )
-
-    with urlopen(request, timeout=90) as response:
-        return response.read()
-
-
-def get_redfox_did(client):
     try:
-        result = client.com.atproto.identity.resolve_handle(
-            {"handle": REDFOX_HANDLE}
-        )
-        return result.did
-    except Exception as error:
-        print(f"⚠️ RedFox handle kon niet worden opgelost: {error}")
+        return blob.ref.link
+    except (AttributeError, TypeError):
         return None
-
-
-def make_redfox_facets(text, redfox_did):
-    if not redfox_did:
-        return None
-
-    mention = f"@{REDFOX_HANDLE}"
-    position = text.find(mention)
-
-    if position < 0:
-        return None
-
-    byte_start = len(text[:position].encode("utf-8"))
-    byte_end = byte_start + len(mention.encode("utf-8"))
-
-    return [
-        models.AppBskyRichtextFacet.Main(
-            index=models.AppBskyRichtextFacet.ByteSlice(
-                byte_start=byte_start,
-                byte_end=byte_end,
-            ),
-            features=[
-                models.AppBskyRichtextFacet.Mention(
-                    did=redfox_did,
-                )
-            ],
-        )
-    ]
 
 
 # ============================================================
-# IDENTIFY SERIES
+# BRONACCOUNT DOORZOEKEN
+# Alleen originele posts, geen replies of reposts
 # ============================================================
 
-def collect_series_roots(client):
-    """
-    Zoek mediaberichten van de bron.
-    Gebruik de root van een reply om de volledige serie te vinden.
-    """
+def collect_candidates(client, published):
 
-    roots = set()
+    cutoff = (
+        datetime.now(timezone.utc)
+        - timedelta(days=MIN_AGE_DAYS)
+    )
+
     cursor = None
+    candidates = []
+    seen_keys = set()
+
+    print(
+        f"🔎 Media ophalen van: {SOURCE}"
+    )
 
     for page in range(1, MAX_PAGES + 1):
-        params = {
-            "actor": SOURCE,
-            "limit": 100,
-            "filter": "posts_with_media",
-        }
 
-        if cursor:
-            params["cursor"] = cursor
+        print(
+            f"📄 Bronpagina {page}/{MAX_PAGES}..."
+        )
 
         try:
-            response = client.app.bsky.feed.get_author_feed(
-                params=params
+
+            result = client.get_author_feed(
+                actor=SOURCE,
+                limit=100,
+                cursor=cursor,
+                filter="posts_with_media"
             )
+
         except Exception as error:
-            print(f"⚠️ Feed ophalen mislukt: {error}")
+
+            print(
+                f"⚠️ Feed ophalen mislukt: {error}"
+            )
+
             break
 
-        feed = response.feed or []
+        feed = result.feed or []
 
         if not feed:
             break
 
         for item in feed:
-            post = item.post
 
+            post = item.post
+            record = post.record
+
+            # Alleen originele posts van de bron.
             if post.author.handle.lower() != SOURCE.lower():
                 continue
 
-            if getattr(item, "reply", None):
-                root_uri = get_reply_root_uri(post)
-                if root_uri:
-                    roots.add(root_uri)
-                else:
-                    roots.add(post.uri)
-            else:
-                roots.add(post.uri)
-
-        cursor = getattr(response, "cursor", None)
-
-        if not cursor:
-            break
-
-        time.sleep(0.3)
-
-    return list(roots)
-
-
-def get_thread_root(client, root_uri):
-    """
-    Haal de thread op vanaf het gevonden rootbericht.
-    """
-
-    response = client.app.bsky.feed.get_post_thread(
-        params={
-            "uri": root_uri,
-            "depth": 100,
-            "parent_height": 0,
-        }
-    )
-
-    return response.thread
-
-
-def flatten_own_series(thread):
-    """
-    Behoud de oorspronkelijke volgorde:
-    hoofdpost, daarna eigen replies.
-    Replies van andere accounts worden genegeerd.
-    """
-
-    result = []
-
-    def walk(node, is_root=False):
-        post = getattr(node, "post", None)
-
-        if post:
-            author = getattr(post.author, "handle", "").lower()
-
-            if author == SOURCE.lower():
-                if is_root or not getattr(
-                    getattr(post.record, "reply", None),
-                    "parent",
-                    None,
-                ):
-                    result.append(post)
-                else:
-                    # Alleen eigen replies die bij de thread horen.
-                    result.append(post)
-
-        replies = getattr(node, "replies", None) or []
-
-        for child in replies:
-            child_post = getattr(child, "post", None)
-
-            if not child_post:
+            # Geen reposts.
+            if getattr(item, "reason", None) is not None:
                 continue
 
-            # Geen inhoud van andere auteurs overnemen.
-            if child_post.author.handle.lower() != SOURCE.lower():
+            if not isinstance(
+                record,
+                models.AppBskyFeedPost.Record
+            ):
                 continue
 
-            walk(child)
+            # Geen replies.
+            if getattr(record, "reply", None) is not None:
+                continue
 
-    walk(thread, is_root=True)
-    return result
+            created = parse_created_at(
+                getattr(record, "created_at", None)
+            )
 
+            if not created or created > cutoff:
+                continue
 
-# ============================================================
-# EXTRACT INDIVIDUAL MEDIA
-# ============================================================
+            embed = getattr(record, "embed", None)
 
-def extract_series_items(root_uri, posts, cutoff, state):
-    """
-    Elke foto uit een carousel wordt een eigen item.
-    Elke video wordt eveneens een eigen item.
-    """
+            if isinstance(
+                embed,
+                models.AppBskyEmbedImages.Main
+            ):
 
-    items = []
-    published = state["published"]
-    redfox_found = False
+                # Iedere foto uit een carousel is een apart item.
+                for index, image in enumerate(embed.images):
 
-    # Als RedFox in enig bericht van de serie voorkomt,
-    # markeren we de serie voor een RedFox-tag.
-    for post in posts:
-        record = get_record(post)
-        text = getattr(record, "text", "") or ""
+                    cid = get_media_blob_cid(
+                        image.image
+                    )
 
-        if REDFOX_HANDLE.lower() in text.lower():
-            redfox_found = True
+                    if not cid:
+                        continue
 
-        embed = getattr(post, "embed", None)
-        media_type = get_media_type(embed)
+                    media_key = (
+                        f"{post.uri}#image-{index}-{cid}"
+                    )
 
-        if media_type == "images":
-            for index, image in enumerate(embed.images):
-                blob_ref = getattr(image.image, "ref", None)
-                cid = getattr(blob_ref, "ref", None)
+                    if media_key in published:
+                        continue
+
+                    if media_key in seen_keys:
+                        continue
+
+                    seen_keys.add(media_key)
+
+                    original_text = (
+                        getattr(record, "text", "")
+                        or ""
+                    )
+
+                    candidates.append({
+                        "key": media_key,
+                        "uri": post.uri,
+                        "kind": "image",
+                        "blob": image.image,
+                        "alt": getattr(image, "alt", "") or "",
+                        "aspect_ratio": getattr(
+                            image,
+                            "aspect_ratio",
+                            None
+                        ),
+                        "original_text": original_text,
+                        "created_at": created,
+                    })
+
+            elif isinstance(
+                embed,
+                models.AppBskyEmbedVideo.Main
+            ):
+
+                cid = get_media_blob_cid(
+                    embed.video
+                )
 
                 if not cid:
                     continue
 
                 media_key = (
-                    f"{post.uri}|image|{index}|{cid}"
+                    f"{post.uri}#video-{cid}"
                 )
 
                 if media_key in published:
                     continue
 
-                created_at = get_created_at(post)
-
-                if not created_at or created_at > cutoff:
+                if media_key in seen_keys:
                     continue
 
-                items.append({
+                seen_keys.add(media_key)
+
+                original_text = (
+                    getattr(record, "text", "")
+                    or ""
+                )
+
+                candidates.append({
                     "key": media_key,
-                    "kind": "image",
-                    "post_uri": post.uri,
-                    "post_cid": post.cid,
-                    "image": image,
-                    "redfox": False,
-                    "created_at": created_at.isoformat(),
+                    "uri": post.uri,
+                    "kind": "video",
+                    "blob": embed.video,
+                    "alt": getattr(embed, "alt", "") or "",
+                    "aspect_ratio": getattr(
+                        embed,
+                        "aspect_ratio",
+                        None
+                    ),
+                    "original_text": original_text,
+                    "created_at": created,
                 })
 
-        elif media_type == "video":
-            video = getattr(embed, "video", None)
-            blob_ref = getattr(video, "ref", None) if video else None
-            cid = getattr(blob_ref, "ref", None)
+        cursor = getattr(result, "cursor", None)
 
-            if not cid:
-                continue
+        if not cursor:
+            break
 
-            media_key = f"{post.uri}|video|{cid}"
+        time.sleep(0.2)
 
-            if media_key in published:
-                continue
-
-            created_at = get_created_at(post)
-
-            if not created_at or created_at > cutoff:
-                continue
-
-            items.append({
-                "key": media_key,
-                "kind": "video",
-                "post_uri": post.uri,
-                "post_cid": post.cid,
-                "embed": embed,
-                "redfox": False,
-                "created_at": created_at.isoformat(),
-            })
-
-    # Tag alleen wanneer RedFox in de serie is genoemd.
-    if redfox_found:
-        for item in items:
-            item["redfox"] = True
-
-    return items
-
-
-def collect_all_series(client, state):
-    cutoff = datetime.now(timezone.utc) - timedelta(
-        days=MIN_AGE_DAYS
-    )
-
-    roots = collect_series_roots(client)
-    print(f"🔎 Mogelijke series gevonden: {len(roots)}")
-
-    all_series = []
-
-    for root_uri in roots:
-        try:
-            thread = get_thread_root(client, root_uri)
-            posts = flatten_own_series(thread)
-
-            if not posts:
-                continue
-
-            items = extract_series_items(
-                root_uri,
-                posts,
-                cutoff,
-                state,
-            )
-
-            if items:
-                all_series.append({
-                    "root_uri": root_uri,
-                    "items": items,
-                })
-
-        except Exception as error:
-            print(f"⚠️ Serie overslaan ({root_uri}): {error}")
-
-        time.sleep(0.3)
-
-    return all_series
+    return candidates
 
 
 # ============================================================
-# UPLOAD AND PUBLISH
+# FOTO PUBLICEREN
 # ============================================================
 
-def publish_image(client, item, redfox_did):
-    image = item["image"]
-    blob_ref = image.image.ref
+def publish_image(client, item):
 
-    raw_data = get_blob_bytes(
-        blob_ref.did,
-        blob_ref.ref,
+    raw = download(
+        blob_url(
+            item["uri"],
+            item["blob"]
+        )
     )
 
-    if len(raw_data) > 1_000_000:
-        print("⚠️ Foto groter dan 1 MB; overgeslagen.")
+    # Bluesky-fotolimiet: maximaal 1 MB per afbeelding.
+    if len(raw) > 1_000_000:
+
+        print(
+            "⚠️ Foto groter dan 1 MB; overgeslagen."
+        )
+
         return False
 
-    uploaded = client.upload_blob(raw_data)
+    uploaded = client.upload_blob(raw).blob
 
-    embed = models.AppBskyEmbedImages.Main(
-        images=[
-            models.AppBskyEmbedImages.Image(
-                alt=getattr(image, "alt", "") or "",
-                image=uploaded.blob,
-            )
-        ]
+    new_image = models.AppBskyEmbedImages.Image(
+        alt=item["alt"],
+        image=uploaded
     )
 
-    text = ""
-    facets = None
+    if item["aspect_ratio"]:
 
-    if item["redfox"]:
-        text = f"👉🏻 @{REDFOX_HANDLE}"
-        facets = make_redfox_facets(text, redfox_did)
+        new_image.aspect_ratio = (
+            item["aspect_ratio"]
+        )
 
-    client.send_post(
-        text=text,
-        embed=embed,
-        facets=facets,
+    new_embed = models.AppBskyEmbedImages.Main(
+        images=[new_image]
     )
 
-    return True
-
-
-def publish_video(client, item, redfox_did):
-    video = item["embed"].video
-    blob_ref = video.ref
-
-    raw_data = get_blob_bytes(
-        blob_ref.did,
-        blob_ref.ref,
+    caption, facets = make_caption(
+        client,
+        item["original_text"]
     )
 
-    if len(raw_data) > 100 * 1024 * 1024:
-        print("⚠️ Video groter dan 100 MB; overgeslagen.")
+    response = client.send_post(
+        text=caption,
+        embed=new_embed,
+        facets=facets
+    )
+
+    print(
+        f"✅ Foto gepubliceerd: {response.uri}"
+    )
+
+    return response.uri
+
+
+# ============================================================
+# VIDEO PUBLICEREN
+# ============================================================
+
+def publish_video(client, item):
+
+    raw = download(
+        blob_url(
+            item["uri"],
+            item["blob"]
+        )
+    )
+
+    if len(raw) > 100 * 1024 * 1024:
+
+        print(
+            "⚠️ Video groter dan 100 MB; overgeslagen."
+        )
+
         return False
 
-    uploaded = client.upload_blob(raw_data)
+    uploaded = client.upload_blob(raw).blob
 
-    embed = models.AppBskyEmbedVideo.Main(
-        video=uploaded.blob,
-        alt=getattr(video, "alt", "") or "",
+    video_args = {
+        "video": uploaded
+    }
+
+    if item["aspect_ratio"]:
+        video_args["aspect_ratio"] = (
+            item["aspect_ratio"]
+        )
+
+    new_embed = models.AppBskyEmbedVideo.Main(
+        **video_args
     )
 
-    text = ""
-    facets = None
-
-    if item["redfox"]:
-        text = f"👉🏻 @{REDFOX_HANDLE}"
-        facets = make_redfox_facets(text, redfox_did)
-
-    client.send_post(
-        text=text,
-        embed=embed,
-        facets=facets,
+    caption, facets = make_caption(
+        client,
+        item["original_text"]
     )
 
-    return True
+    response = client.send_post(
+        text=caption,
+        embed=new_embed,
+        facets=facets
+    )
+
+    print(
+        f"✅ Video gepubliceerd: {response.uri}"
+    )
+
+    return response.uri
 
 
 # ============================================================
@@ -518,9 +562,11 @@ def publish_video(client, item, redfox_did):
 # ============================================================
 
 def main():
+
     print("=" * 60)
-    print("KNIGHTTAKESQUEEN BACKUP AUTOPOST")
+    print("KNIGHTTAKESQUEEN MEDIA AUTOPOST")
     print("=" * 60)
+
     print(f"Bron: {SOURCE}")
     print(f"Doel: {TARGET}")
     print(f"Minimumleeftijd: {MIN_AGE_DAYS} dagen")
@@ -528,115 +574,113 @@ def main():
     print(f"Dry run: {DRY_RUN}")
 
     state = load_state()
+    published = state["published"]
 
     client = Client()
+
     print("\n🔗 Verbinden met Bluesky...")
-    client.login(TARGET, PASSWORD)
-    print("✅ Ingelogd als", TARGET)
 
-    redfox_did = get_redfox_did(client)
+    client.login(
+        TARGET,
+        PASSWORD
+    )
 
-    series_list = collect_all_series(client, state)
+    print(
+        f"✅ Ingelogd als {TARGET}"
+    )
 
-    if not series_list:
-        print("ℹ️ Geen geschikte, nieuwe media gevonden.")
-        save_state(state)
-        return
+    candidates = collect_candidates(
+        client,
+        published
+    )
 
-    # Willekeurige keuze van series, maar de volgorde
-    # binnen iedere serie blijft behouden.
-    random.shuffle(series_list)
+    print(
+        f"\n📊 Geschikte nieuwe media gevonden: "
+        f"{len(candidates)}"
+    )
 
-    # Als een serie nog bezig is, krijgt die voorrang
-    # bij de volgende uitvoering.
-    active_root = state.get("series_progress", {}).get("active_root")
+    if not candidates:
 
-    if active_root:
-        series_list.sort(
-            key=lambda series: series["root_uri"] != active_root
+        print(
+            "ℹ️ Geen geschikte, nieuwe media gevonden."
         )
 
-    queue = []
+        return
 
-    for series in series_list:
-        for item in series["items"]:
-            item["series_root"] = series["root_uri"]
-            queue.append(item)
+    # Willekeurige volgorde, zoals in Scazmo.
+    random.shuffle(candidates)
 
-    queue = queue[:MAX_POSTS]
+    selected = candidates[:MAX_POSTS]
+
+    print(
+        f"🎲 Willekeurig geselecteerd: {len(selected)}"
+    )
 
     if DRY_RUN:
-        print("\n🧪 DRY RUN — er worden geen posts geplaatst.")
 
-        for item in queue:
+        print(
+            "\n🧪 DRY RUN: er worden geen berichten gepubliceerd."
+        )
+
+        for item in selected:
+
             print(
-                item["kind"],
-                item["key"],
-                "RedFox-tag:", item["redfox"],
+                f"- {item['kind']} | "
+                f"{item['key']} | "
+                f"Bron: {item['uri']}"
             )
 
         return
 
     published_count = 0
 
-    for item in queue:
-        print(f"\n📤 Publiceren: {item['kind']}")
+    for item in selected:
+
+        print(
+            f"\n📤 Publiceren: {item['kind']}"
+        )
 
         try:
+
             if item["kind"] == "image":
-                success = publish_image(
+
+                response_uri = publish_image(
                     client,
-                    item,
-                    redfox_did,
-                )
-            else:
-                success = publish_video(
-                    client,
-                    item,
-                    redfox_did,
+                    item
                 )
 
-            if success:
-                state["published"][item["key"]] = {
+            else:
+
+                response_uri = publish_video(
+                    client,
+                    item
+                )
+
+            if response_uri:
+
+                published[item["key"]] = {
                     "published_at": datetime.now(
                         timezone.utc
                     ).isoformat(),
-                    "series_root": item["series_root"],
+                    "source_uri": item["uri"],
+                    "target_uri": response_uri,
                     "kind": item["kind"],
                 }
 
-                state["series_progress"]["active_root"] = (
-                    item["series_root"]
-                )
-
-                published_count += 1
                 save_state(state)
 
-                print("✅ Gepubliceerd")
+                published_count += 1
+
                 time.sleep(SLEEP_SECONDS)
 
         except Exception as error:
-            print(f"⚠️ Publiceren mislukt: {error}")
 
-    # Controleer of de actieve serie nog niet-gepubliceerde
-    # items heeft. Als die klaar is, wordt de actieve serie gewist.
-    active_root = state["series_progress"].get("active_root")
-
-    if active_root:
-        still_pending = any(
-            item["series_root"] == active_root
-            and item["key"] not in state["published"]
-            for series in series_list
-            for item in series["items"]
-        )
-
-        if not still_pending:
-            state["series_progress"].pop("active_root", None)
-
-    save_state(state)
+            print(
+                f"⚠️ Publiceren mislukt: {error}"
+            )
 
     print(
-        f"\n🏁 Klaar. Nieuwe posts geplaatst: "
+        f"\n🏁 Klaar. Nieuwe berichten geplaatst: "
         f"{published_count}/{MAX_POSTS}"
     )
 
