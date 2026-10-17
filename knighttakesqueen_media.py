@@ -14,8 +14,7 @@ from atproto import Client, models
 
 
 # ============================================================
-# KNIGHTTAKESQUEEN MEDIA AUTOPOST
-# Gebaseerd op het werkende Scazmo-script
+# INSTELLINGEN
 # ============================================================
 
 SOURCE = os.getenv(
@@ -49,11 +48,6 @@ MAX_POSTS = int(
     os.getenv("MAX_POSTS", "3")
 )
 
-DRY_RUN = (
-    os.getenv("DRY_RUN", "true").lower()
-    == "true"
-)
-
 SLEEP_SECONDS = 2
 
 REDFOX_HANDLE = "redfoxofficial.bsky.social"
@@ -71,7 +65,7 @@ REDFOX_PATTERN = re.compile(
 
 def download(url):
 
-    request = urllib.request.Request(
+    req = urllib.request.Request(
         url,
         headers={
             "User-Agent": "KnightTakesQueenMedia/1.0"
@@ -79,11 +73,11 @@ def download(url):
     )
 
     with urllib.request.urlopen(
-        request,
+        req,
         timeout=90
-    ) as response:
+    ) as resp:
 
-        return response.read()
+        return resp.read()
 
 
 def blob_url(uri, blob):
@@ -115,11 +109,10 @@ def load_state():
                 STATE.read_text(encoding="utf-8")
             )
         except (OSError, json.JSONDecodeError):
-            print("⚠️ Statebestand ongeldig; nieuwe geschiedenis gestart.")
-            state = {}
+            state = {"published": {}}
 
     else:
-        state = {}
+        state = {"published": {}}
 
     state.setdefault("published", {})
 
@@ -151,50 +144,42 @@ def save_state(state):
 # REDFOX MENTION
 # ============================================================
 
-def get_redfox_did(client):
+def make_caption(client, original_text):
+
+    original_text = original_text or ""
+
+    if not REDFOX_PATTERN.search(original_text):
+        return "", None
+
+    print("RedFox gevonden in originele bronpost.")
 
     try:
-
         profile = client.get_profile(
             actor=REDFOX_HANDLE
         )
 
-        return profile.did
+        redfox_did = profile.did
 
-    except Exception as error:
+    except Exception as exc:
+        print(f"⚠️ RedFox-DID ophalen mislukt: {exc}")
+        return "", None
 
-        print(
-            f"⚠️ RedFox-account niet gevonden: {error}"
-        )
-
-        return None
-
-
-def make_redfox_facets(text, redfox_did):
-
-    if not redfox_did:
-        return None
+    caption = "👉🏻 @" + REDFOX_HANDLE
 
     mention = "@" + REDFOX_HANDLE
 
-    position = text.encode("utf-8").find(
+    start = caption.encode("utf-8").find(
         mention.encode("utf-8")
     )
 
-    if position < 0:
-        return None
-
-    byte_start = position
-
-    byte_end = (
-        byte_start
-        + len(mention.encode("utf-8"))
+    end = start + len(
+        mention.encode("utf-8")
     )
 
     facet = models.AppBskyRichtextFacet.Main(
         index=models.AppBskyRichtextFacet.ByteSlice(
-            byte_start=byte_start,
-            byte_end=byte_end
+            byte_start=start,
+            byte_end=end
         ),
         features=[
             models.AppBskyRichtextFacet.Mention(
@@ -203,71 +188,11 @@ def make_redfox_facets(text, redfox_did):
         ]
     )
 
-    return [facet]
-
-
-def make_caption(client, original_text):
-
-    original_text = original_text or ""
-
-    if not REDFOX_PATTERN.search(original_text):
-
-        return "", None
-
-    print(
-        "❣️ RedFox gevonden in de originele bronpost."
-    )
-
-    redfox_did = get_redfox_did(client)
-
-    caption = "👉🏻 @" + REDFOX_HANDLE
-
-    facets = make_redfox_facets(
-        caption,
-        redfox_did
-    )
-
-    return caption, facets
+    return caption, [facet]
 
 
 # ============================================================
-# DATUM EN MEDIA HELPERS
-# ============================================================
-
-def parse_created_at(value):
-
-    if not value:
-        return None
-
-    try:
-
-        result = datetime.fromisoformat(
-            value.replace("Z", "+00:00")
-        )
-
-        if result.tzinfo is None:
-            result = result.replace(
-                tzinfo=timezone.utc
-            )
-
-        return result.astimezone(timezone.utc)
-
-    except (ValueError, TypeError):
-
-        return None
-
-
-def get_media_blob_cid(blob):
-
-    try:
-        return blob.ref.link
-    except (AttributeError, TypeError):
-        return None
-
-
-# ============================================================
-# BRONACCOUNT DOORZOEKEN
-# Alleen originele posts, geen replies of reposts
+# MEDIA OPHALEN EN SELECTEREN
 # ============================================================
 
 def collect_candidates(client, published):
@@ -279,46 +204,28 @@ def collect_candidates(client, published):
 
     cursor = None
     candidates = []
-    seen_keys = set()
 
-    print(
-        f"🔎 Media ophalen van: {SOURCE}"
-    )
+    print(f"Media ophalen van: {SOURCE}")
 
-    for page in range(1, MAX_PAGES + 1):
+    for page in range(MAX_PAGES):
 
         print(
-            f"📄 Bronpagina {page}/{MAX_PAGES}..."
+            f"Bronpagina {page + 1}/{MAX_PAGES}"
         )
 
-        try:
+        result = client.get_author_feed(
+            actor=SOURCE,
+            limit=100,
+            cursor=cursor,
+            filter="posts_with_media"
+        )
 
-            result = client.get_author_feed(
-                actor=SOURCE,
-                limit=100,
-                cursor=cursor,
-                filter="posts_with_media"
-            )
-
-        except Exception as error:
-
-            print(
-                f"⚠️ Feed ophalen mislukt: {error}"
-            )
-
-            break
-
-        feed = result.feed or []
-
-        if not feed:
-            break
-
-        for item in feed:
+        for item in result.feed:
 
             post = item.post
             record = post.record
 
-            # Alleen originele posts van de bron.
+            # Alleen berichten van het bronaccount.
             if post.author.handle.lower() != SOURCE.lower():
                 continue
 
@@ -336,107 +243,80 @@ def collect_candidates(client, published):
             if getattr(record, "reply", None) is not None:
                 continue
 
-            created = parse_created_at(
-                getattr(record, "created_at", None)
-            )
-
-            if not created or created > cutoff:
-                continue
-
+            # Zelfde mediaherkenning als Scazmo.
             embed = getattr(record, "embed", None)
 
+            if not isinstance(
+                embed,
+                (
+                    models.AppBskyEmbedImages.Main,
+                    models.AppBskyEmbedVideo.Main
+                )
+            ):
+                continue
+
+            created = datetime.fromisoformat(
+                record.created_at.replace(
+                    "Z",
+                    "+00:00"
+                )
+            )
+
+            if created > cutoff:
+                continue
+
+            uri = post.uri
+            original_text = getattr(
+                record,
+                "text",
+                ""
+            ) or ""
+
+            # Foto's afzonderlijk selecteren.
             if isinstance(
                 embed,
                 models.AppBskyEmbedImages.Main
             ):
 
-                # Iedere foto uit een carousel is een apart item.
                 for index, image in enumerate(embed.images):
 
-                    cid = get_media_blob_cid(
-                        image.image
-                    )
-
-                    if not cid:
-                        continue
-
                     media_key = (
-                        f"{post.uri}#image-{index}-{cid}"
+                        f"{uri}#image-{index}"
                     )
 
                     if media_key in published:
                         continue
 
-                    if media_key in seen_keys:
-                        continue
-
-                    seen_keys.add(media_key)
-
-                    original_text = (
-                        getattr(record, "text", "")
-                        or ""
-                    )
-
                     candidates.append({
+                        "created": created,
+                        "uri": uri,
                         "key": media_key,
-                        "uri": post.uri,
                         "kind": "image",
-                        "blob": image.image,
-                        "alt": getattr(image, "alt", "") or "",
-                        "aspect_ratio": getattr(
-                            image,
-                            "aspect_ratio",
-                            None
-                        ),
-                        "original_text": original_text,
-                        "created_at": created,
+                        "media": image,
+                        "text": original_text
                     })
 
+            # Video als één bericht selecteren.
             elif isinstance(
                 embed,
                 models.AppBskyEmbedVideo.Main
             ):
 
-                cid = get_media_blob_cid(
-                    embed.video
-                )
-
-                if not cid:
-                    continue
-
-                media_key = (
-                    f"{post.uri}#video-{cid}"
-                )
+                media_key = f"{uri}#video"
 
                 if media_key in published:
                     continue
 
-                if media_key in seen_keys:
-                    continue
-
-                seen_keys.add(media_key)
-
-                original_text = (
-                    getattr(record, "text", "")
-                    or ""
-                )
-
                 candidates.append({
+                    "created": created,
+                    "uri": uri,
                     "key": media_key,
-                    "uri": post.uri,
                     "kind": "video",
-                    "blob": embed.video,
-                    "alt": getattr(embed, "alt", "") or "",
-                    "aspect_ratio": getattr(
-                        embed,
-                        "aspect_ratio",
-                        None
-                    ),
-                    "original_text": original_text,
-                    "created_at": created,
+                    "media": embed,
+                    "text": original_text
                 })
 
-        cursor = getattr(result, "cursor", None)
+        cursor = result.cursor
 
         if not cursor:
             break
@@ -452,34 +332,29 @@ def collect_candidates(client, published):
 
 def publish_image(client, item):
 
+    image = item["media"]
+    blob = image.image
+
     raw = download(
         blob_url(
             item["uri"],
-            item["blob"]
+            blob
         )
     )
 
-    # Bluesky-fotolimiet: maximaal 1 MB per afbeelding.
     if len(raw) > 1_000_000:
-
-        print(
-            "⚠️ Foto groter dan 1 MB; overgeslagen."
-        )
-
-        return False
+        print("⚠️ Foto groter dan 1 MB; overgeslagen.")
+        return None
 
     uploaded = client.upload_blob(raw).blob
 
     new_image = models.AppBskyEmbedImages.Image(
-        alt=item["alt"],
+        alt=getattr(image, "alt", "") or "",
         image=uploaded
     )
 
-    if item["aspect_ratio"]:
-
-        new_image.aspect_ratio = (
-            item["aspect_ratio"]
-        )
+    if getattr(image, "aspect_ratio", None):
+        new_image.aspect_ratio = image.aspect_ratio
 
     new_embed = models.AppBskyEmbedImages.Main(
         images=[new_image]
@@ -487,17 +362,13 @@ def publish_image(client, item):
 
     caption, facets = make_caption(
         client,
-        item["original_text"]
+        item["text"]
     )
 
     response = client.send_post(
         text=caption,
         embed=new_embed,
         facets=facets
-    )
-
-    print(
-        f"✅ Foto gepubliceerd: {response.uri}"
     )
 
     return response.uri
@@ -509,20 +380,19 @@ def publish_image(client, item):
 
 def publish_video(client, item):
 
+    video_embed = item["media"]
+    blob = video_embed.video
+
     raw = download(
         blob_url(
             item["uri"],
-            item["blob"]
+            blob
         )
     )
 
-    if len(raw) > 100 * 1024 * 1024:
-
-        print(
-            "⚠️ Video groter dan 100 MB; overgeslagen."
-        )
-
-        return False
+    if len(raw) > 100_000_000:
+        print("⚠️ Video groter dan 100 MB; overgeslagen.")
+        return None
 
     uploaded = client.upload_blob(raw).blob
 
@@ -530,10 +400,8 @@ def publish_video(client, item):
         "video": uploaded
     }
 
-    if item["aspect_ratio"]:
-        video_args["aspect_ratio"] = (
-            item["aspect_ratio"]
-        )
+    if getattr(video_embed, "aspect_ratio", None):
+        video_args["aspect_ratio"] = video_embed.aspect_ratio
 
     new_embed = models.AppBskyEmbedVideo.Main(
         **video_args
@@ -541,17 +409,13 @@ def publish_video(client, item):
 
     caption, facets = make_caption(
         client,
-        item["original_text"]
+        item["text"]
     )
 
     response = client.send_post(
         text=caption,
         embed=new_embed,
         facets=facets
-    )
-
-    print(
-        f"✅ Video gepubliceerd: {response.uri}"
     )
 
     return response.uri
@@ -571,23 +435,20 @@ def main():
     print(f"Doel: {TARGET}")
     print(f"Minimumleeftijd: {MIN_AGE_DAYS} dagen")
     print(f"Maximum per uitvoering: {MAX_POSTS}")
-    print(f"Dry run: {DRY_RUN}")
 
     state = load_state()
     published = state["published"]
 
     client = Client()
 
-    print("\n🔗 Verbinden met Bluesky...")
+    print("\nVerbinden met Bluesky...")
 
     client.login(
         TARGET,
         PASSWORD
     )
 
-    print(
-        f"✅ Ingelogd als {TARGET}"
-    )
+    print(f"Ingelogd als: {TARGET}")
 
     candidates = collect_candidates(
         client,
@@ -595,92 +456,65 @@ def main():
     )
 
     print(
-        f"\n📊 Geschikte nieuwe media gevonden: "
+        f"Geschikte nieuwe media gevonden: "
         f"{len(candidates)}"
     )
 
     if not candidates:
-
-        print(
-            "ℹ️ Geen geschikte, nieuwe media gevonden."
-        )
-
+        print("Geen geschikte, nieuwe media gevonden.")
         return
 
-    # Willekeurige volgorde, zoals in Scazmo.
     random.shuffle(candidates)
 
     selected = candidates[:MAX_POSTS]
 
     print(
-        f"🎲 Willekeurig geselecteerd: {len(selected)}"
+        f"Willekeurig geselecteerd: {len(selected)}"
     )
-
-    if DRY_RUN:
-
-        print(
-            "\n🧪 DRY RUN: er worden geen berichten gepubliceerd."
-        )
-
-        for item in selected:
-
-            print(
-                f"- {item['kind']} | "
-                f"{item['key']} | "
-                f"Bron: {item['uri']}"
-            )
-
-        return
 
     published_count = 0
 
     for item in selected:
 
         print(
-            f"\n📤 Publiceren: {item['kind']}"
+            f"\nPubliceren: {item['kind']} | "
+            f"{item['key']}"
         )
 
         try:
 
             if item["kind"] == "image":
-
                 response_uri = publish_image(
                     client,
                     item
                 )
-
             else:
-
                 response_uri = publish_video(
                     client,
                     item
                 )
 
-            if response_uri:
+            if not response_uri:
+                continue
 
-                published[item["key"]] = {
-                    "published_at": datetime.now(
-                        timezone.utc
-                    ).isoformat(),
-                    "source_uri": item["uri"],
-                    "target_uri": response_uri,
-                    "kind": item["kind"],
-                }
+            published[item["key"]] = response_uri
 
-                save_state(state)
+            save_state(state)
 
-                published_count += 1
+            published_count += 1
 
-                time.sleep(SLEEP_SECONDS)
+            print(f"Gepubliceerd: {response_uri}")
 
-        except Exception as error:
+            time.sleep(SLEEP_SECONDS)
+
+        except Exception as exc:
 
             print(
-                f"⚠️ Publiceren mislukt: {error}"
+                f"⚠️ Publiceren mislukt: {exc}"
             )
 
     print(
-        f"\n🏁 Klaar. Nieuwe berichten geplaatst: "
+        f"\nKlaar. Gepubliceerd: "
         f"{published_count}/{MAX_POSTS}"
     )
 
