@@ -42,16 +42,13 @@ jobs:
           MAX_POSTS: "3"
         run: python knighttakesqueen_media.py
 
-      - name: Ensure state file exists
-        if: always()
-        run: |
-          if [ ! -f knighttakesqueen_state.json ]; then
-            printf '{\n  "published": {}\n}\n' > knighttakesqueen_state.json
-          fi
-
       - name: Save state file
         if: always()
         run: |
+          if [ ! -f knighttakesqueen_state.json ]; then
+            echo '{"published": {}}' > knighttakesqueen_state.json
+          fi
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
