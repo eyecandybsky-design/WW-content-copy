@@ -1,20 +1,17 @@
-name: Scazmo Media Copy
+name: Tullageback Media
 
 on:
   workflow_dispatch:
-
-permissions:
-  contents: write
+  schedule:
+    - cron: "21 * * * *"
 
 jobs:
-  copy-media:
+  repost-media:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          persist-credentials: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -23,26 +20,22 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -r requirements.txt
+          python -m pip install --upgrade pip
+          pip install atproto
 
-      - name: Run Scazmo media copy
+      - name: Run Tullageback Media
         env:
-          BSKY_USERNAME: scazmo.bsky.social
-          BSKY_PASSWORD: ${{ secrets.SCAZMO_PASSWORD }}
-        run: python scazmo_media.py
+          SOURCE_ACCOUNT: scazmo.bsky.social
+          BSKY_USERNAME: snarlup.bsky.social
+          BSKY_SNARLUP_PASSWORD: ${{ secrets.BSKY_SNARLUP_PASSWORD }}
+          STATE_FILE: tullageback_media_state.json
+          MIN_AGE_DAYS: "14"
+          MAX_PAGES: "30"
+          MAX_POSTS: "3"
+        run: python tullageback_media.py
 
-      - name: Save Scazmo media history
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-          if [ -f scazmo_state.json ]; then
-            git add scazmo_state.json
-
-            if ! git diff --cached --quiet; then
-              git commit -m "Update Scazmo media history"
-              git push
-            fi
-          else
-            echo "scazmo_state.json not found; nothing to commit."
-          fi
+      - name: Save publication state
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Update Tullageback media state"
+          file_pattern: tullageback_media_state.json
