@@ -1,803 +1,708 @@
 #!/usr/bin/env python3
 
-import io
-import os
 import json
+import os
+import re
 import time
-import random
+import urllib.parse
 import urllib.request
-
 from datetime import datetime, timedelta, timezone
+from io import BytesIO
 from pathlib import Path
 
-from PIL import Image, ImageOps
 from atproto import Client, models
+from PIL import Image, ImageOps
 
 
-# ==========================================
-# INSTELLINGEN
-# ==========================================
+# ============================================================
+# CONFIGURATIE
+# ============================================================
 
-SOURCE = os.getenv(
-    "SOURCE_ACCOUNT",
-    "scazmo.bsky.social"
-).lstrip("@")
+SOURCE_ACCOUNT = os.getenv(
+    "SOURCE_ACCOUNT", "scazmo.bsky.social"
+)
 
-TARGET = os.getenv(
-    "BSKY_USERNAME",
-    "snarlup.bsky.social"
-).lstrip("@")
+TARGET_ACCOUNT = os.getenv(
+    "BSKY_USERNAME", "snarlup.bsky.social"
+)
 
-# Eigen GitHub Secret voor Snarlup
 PASSWORD = os.environ["BSKY_SNARLUP_PASSWORD"]
 
-STATE = Path(
-    os.getenv(
-        "STATE_FILE",
-        "tullageback_media_state.json"
-    )
+STATE_FILE = os.getenv(
+    "STATE_FILE", "tullageback_media_state.json"
 )
 
 MIN_AGE_DAYS = int(os.getenv("MIN_AGE_DAYS", "14"))
 MAX_PAGES = int(os.getenv("MAX_PAGES", "30"))
 MAX_POSTS = int(os.getenv("MAX_POSTS", "3"))
 
-# Maximale grootte voor afbeeldingen
 MAX_IMAGE_BYTES = 1_000_000
-
-# Maximale grootte voor video's
 MAX_VIDEO_BYTES = 100_000_000
 
-# RedFox-mention
-REDFOX_HANDLE = "redfoxofficial.bsky.social"
-REDFOX_PREFIX = "🦊 "
-REDFOX_SUFFIX = " 🦊"
-
-# Reboost laatste drie eigen originele posts
-OWN_REBOOST_COUNT = 3
-REBOOST_DELAY = 2
-
-# Pauze tussen publicaties
 POST_DELAY = 2
+REBOOST_DELAY = 2
+OWN_REBOOST_COUNT = 3
 
-# False = daadwerkelijk publiceren
-DRY_RUN = (
-    os.getenv("DRY_RUN", "false").lower() == "true"
-)
+REDFOX_HANDLE = "redfoxofficial.bsky.social"
+REDFOX_TEXT = f"🦊 @{REDFOX_HANDLE} 🦊"
 
-
-# ==========================================
-# MEDIA DOWNLOADEN
-# ==========================================
-
-def download(url):
-
-    req = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": "TullagebackMedia/1.0"
-        }
-    )
-
-    with urllib.request.urlopen(req, timeout=90) as resp:
-        return resp.read()
+DRY_RUN = os.getenv("DRY_RUN", "false").lower() == "true"
 
 
-# ==========================================
-# PUBLICATIEGESCHIEDENIS
-# ==========================================
+# ============================================================
+# ALGEMENE FUNCTIES
+# ============================================================
+
+def log(message):
+    print(f"[Tullageback Media] {message}", flush=True)
+
 
 def load_state():
+    path = Path(STATE_FILE)
 
-    if STATE.exists():
-        state = json.loads(
-            STATE.read_text(encoding="utf-8")
-        )
-    else:
-        state = {"published": {}}
+    if not path.exists():
+        log("Geen bestaand statusbestand. Nieuwe geschiedenis gestart.")
+        return {}
 
-    state.setdefault("published", {})
-    return state
+    try:
+        with path.open("r", encoding="utf-8") as file:
+            state = json.load(file)
+
+        if not isinstance(state, dict):
+            raise ValueError("Statusbestand bevat geen JSON-object.")
+
+        log(f"Publicatiegeschiedenis geladen: {len(state)} items.")
+        return state
+
+    except (json.JSONDecodeError, OSError, ValueError) as exc:
+        raise RuntimeError(
+            f"Statusbestand kan niet veilig worden gelezen: {exc}"
+        ) from exc
 
 
 def save_state(state):
+    path = Path(STATE_FILE)
+    temporary_path = path.with_suffix(path.suffix + ".tmp")
 
-    STATE.parent.mkdir(
-        parents=True,
-        exist_ok=True
+    with temporary_path.open("w", encoding="utf-8") as file:
+        json.dump(state, file, indent=2, ensure_ascii=False)
+
+    temporary_path.replace(path)
+    log("Publicatiegeschiedenis opgeslagen.")
+
+
+def parse_datetime(value):
+    if not value:
+        return None
+
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+
+        return parsed.astimezone(timezone.utc)
+
+    except (TypeError, ValueError):
+        return None
+
+
+def get_cid(blob):
+    ref = getattr(blob, "ref", None)
+
+    if ref is None:
+        return None
+
+    return str(ref)
+
+
+def get_embed(record):
+    return getattr(record, "embed", None)
+
+
+def is_quote_post(record):
+    """
+    Quotes en quote-posts worden niet opnieuw gepubliceerd.
+    """
+
+    embed = get_embed(record)
+
+    if embed is None:
+        return False
+
+    class_name = type(embed).__name__.lower()
+
+    if "record" in class_name:
+        return True
+
+    if hasattr(embed, "record"):
+        return True
+
+    return False
+
+
+def is_reply(record):
+    return getattr(record, "reply", None) is not None
+
+
+# ============================================================
+# REDFOX: ALLEEN TAGGEN ALS DE BRONPOST REDFOX NOEMT
+# ============================================================
+
+def source_mentions_redfox(record, redfox_did):
+    """
+    Herkent RedFox in de tekst of in de bestaande mention-facets
+    van de oorspronkelijke Bluesky-post.
+    """
+
+    text = getattr(record, "text", "") or ""
+
+    # Controleer de geschreven handle, hoofdletterongevoelig.
+    handle_pattern = (
+        r"(?<![\w.])@"
+        + re.escape(REDFOX_HANDLE)
+        + r"(?![\w.-])"
     )
 
-    temporary = STATE.with_suffix(
-        STATE.suffix + ".tmp"
-    )
+    if re.search(handle_pattern, text, flags=re.IGNORECASE):
+        return True
 
-    temporary.write_text(
-        json.dumps(state, indent=2),
-        encoding="utf-8"
-    )
+    # Controleer ook echte Bluesky-mentions, zelfs als de tekst
+    # of de weergegeven handle anders is opgemaakt.
+    for facet in getattr(record, "facets", None) or []:
+        for feature in getattr(facet, "features", None) or []:
+            feature_type = type(feature).__name__.lower()
 
-    temporary.replace(STATE)
+            if "mention" not in feature_type:
+                continue
+
+            if getattr(feature, "did", None) == redfox_did:
+                return True
+
+    return False
 
 
-# ==========================================
-# REDFOX: ECHTE KLIKBARE MENTION
-# ==========================================
+def create_redfox_facet(redfox_did):
+    """
+    Maakt de RedFox-tag klikbaar via een echte Bluesky-mention-facet.
+    """
 
-def create_redfox_mention(client):
+    prefix = "🦊 @"
+    suffix = " 🦊"
 
-    profile = client.get_profile(
-        actor=REDFOX_HANDLE
-    )
+    text = prefix + REDFOX_HANDLE + suffix
 
-    handle_text = f"@{REDFOX_HANDLE}"
+    byte_start = len(prefix.encode("utf-8"))
+    byte_end = byte_start + len(REDFOX_HANDLE.encode("utf-8"))
 
-    text = (
-        REDFOX_PREFIX
-        + handle_text
-        + REDFOX_SUFFIX
-    )
-
-    start = len(
-        REDFOX_PREFIX.encode("utf-8")
-    )
-
-    end = start + len(
-        handle_text.encode("utf-8")
-    )
-
-    facet = models.AppBskyRichtextFacet.Main(
+    facet = models.AppBskyRichtextFacet(
         index=models.AppBskyRichtextFacet.ByteSlice(
-            byte_start=start,
-            byte_end=end
+            byte_start=byte_start,
+            byte_end=byte_end,
         ),
         features=[
             models.AppBskyRichtextFacet.Mention(
-                did=profile.did
+                did=redfox_did
             )
-        ]
+        ],
     )
 
     return text, [facet]
 
 
-# ==========================================
-# QUOTE-POSTS HERKENNEN
-# ==========================================
+# ============================================================
+# MEDIA DOWNLOADEN
+# ============================================================
 
-def is_quote_post(record):
+def download_blob(source_did, cid, max_bytes):
+    if not cid:
+        raise ValueError("Media heeft geen geldige CID.")
 
-    embed = getattr(
-        record,
-        "embed",
-        None
+    query = urllib.parse.urlencode({
+        "did": source_did,
+        "cid": cid,
+    })
+
+    url = (
+        "https://bsky.social/xrpc/"
+        "com.atproto.sync.getBlob?"
+        + query
     )
 
-    return isinstance(
-        embed,
-        (
-            models.AppBskyEmbedRecord.Main,
-            models.AppBskyEmbedRecordWithMedia.Main
-        )
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": "TullagebackMedia/1.0"},
     )
 
+    with urllib.request.urlopen(request, timeout=90) as response:
+        content_length = response.headers.get("Content-Length")
 
-# ==========================================
-# LAATSTE DRIE EIGEN POSTS REBOOSTEN
-# ==========================================
-
-def reboost_own_posts(client):
-
-    print(
-        "\n========== EIGEN POSTS REBOOSTEN =========="
-    )
-
-    own_did = client.me.did
-
-    result = client.get_author_feed(
-        actor=own_did,
-        limit=100
-    )
-
-    own_posts = []
-
-    for item in result.feed:
-
-        post = item.post
-        record = post.record
-
-        # Geen reposts
-        if getattr(item, "reason", None) is not None:
-            continue
-
-        # Alleen eigen posts
-        if post.author.did != own_did:
-            continue
-
-        # Alleen originele postrecords
-        if not isinstance(
-            record,
-            models.AppBskyFeedPost.Record
-        ):
-            continue
-
-        # Geen replies
-        if getattr(record, "reply", None) is not None:
-            continue
-
-        # Geen quote-posts
-        if is_quote_post(record):
-            continue
-
-        own_posts.append(post)
-
-        if len(own_posts) >= OWN_REBOOST_COUNT:
-            break
-
-    # Oudste van de drie eerst
-    own_posts.reverse()
-
-    for post in own_posts:
-
-        try:
-
-            print(
-                f"Eigen post: {post.uri}"
+        if content_length and int(content_length) > max_bytes:
+            raise ValueError(
+                f"Bestand is groter dan de limiet van {max_bytes} bytes."
             )
 
-            if DRY_RUN:
-                print(
-                    "DRY_RUN: reboost overgeslagen."
-                )
-                continue
+        data = response.read(max_bytes + 1)
 
-            viewer = getattr(
-                post,
-                "viewer",
-                None
-            )
-
-            repost_uri = (
-                getattr(viewer, "repost", None)
-                if viewer else None
-            )
-
-            # Bestaande repost eerst verwijderen
-            if repost_uri:
-
-                client.delete_repost(
-                    repost_uri
-                )
-
-                print(
-                    "Bestaande repost verwijderd."
-                )
-
-                time.sleep(
-                    REBOOST_DELAY
-                )
-
-            # Daarna opnieuw reposten
-            client.repost(
-                post.uri,
-                post.cid
-            )
-
-            print(
-                "Eigen post opnieuw gerepost."
-            )
-
-            time.sleep(
-                REBOOST_DELAY
-            )
-
-        except Exception as exc:
-
-            print(
-                f"Reboost mislukt voor "
-                f"{post.uri}: {exc}"
-            )
-
-    print(
-        "Reboost afgerond."
-    )
-
-
-# ==========================================
-# FOTO VERKLEINEN TOT MAXIMAAL 1 MB
-# ==========================================
-
-def resize_image(raw):
-
-    if len(raw) <= MAX_IMAGE_BYTES:
-        return raw
-
-    print(
-        f"Foto is {len(raw) / 1_000_000:.2f} MB. "
-        "Automatisch verkleinen..."
-    )
-
-    with Image.open(io.BytesIO(raw)) as original:
-
-        image = ImageOps.exif_transpose(
-            original
+    if len(data) > max_bytes:
+        raise ValueError(
+            f"Bestand overschrijdt de limiet van {max_bytes} bytes."
         )
 
-        # Transparante afbeeldingen op witte achtergrond
-        if (
-            image.mode in ("RGBA", "LA")
-            or (
-                image.mode == "P"
-                and "transparency" in image.info
-            )
-        ):
+    return data
 
+
+# ============================================================
+# FOTO'S VERKLEINEN TOT MAXIMAAL 1 MB
+# ============================================================
+
+def resize_image(raw_data):
+    if len(raw_data) <= MAX_IMAGE_BYTES:
+        return raw_data
+
+    log("Foto groter dan 1 MB. Foto wordt verkleind.")
+
+    with Image.open(BytesIO(raw_data)) as original:
+        image = ImageOps.exif_transpose(original)
+
+        # JPEG ondersteunt geen transparantie.
+        if image.mode in ("RGBA", "LA") or "transparency" in image.info:
             rgba = image.convert("RGBA")
-
-            background = Image.new(
-                "RGBA",
-                rgba.size,
-                (255, 255, 255, 255)
-            )
-
-            image = Image.alpha_composite(
-                background,
-                rgba
-            ).convert("RGB")
-
+            background = Image.new("RGB", rgba.size, "white")
+            background.paste(rgba, mask=rgba.getchannel("A"))
+            image = background
         else:
             image = image.convert("RGB")
 
-        # Herhaaldelijk comprimeren en verkleinen
+        quality_levels = [88, 82, 76, 70, 64, 58, 52, 46, 40, 34]
+
         while True:
-
-            for quality in (88, 80, 72, 64, 56, 48, 40):
-
-                output = io.BytesIO()
+            for quality in quality_levels:
+                output = BytesIO()
 
                 image.save(
                     output,
                     format="JPEG",
                     quality=quality,
-                    optimize=True
+                    optimize=True,
                 )
 
                 result = output.getvalue()
 
                 if len(result) <= MAX_IMAGE_BYTES:
-
-                    print(
-                        "Foto geoptimaliseerd: "
-                        f"{len(result) / 1_000_000:.2f} MB"
+                    log(
+                        f"Foto verkleind tot "
+                        f"{len(result) / 1024:.0f} KB."
                     )
-
                     return result
 
             width, height = image.size
 
             if width <= 320 or height <= 320:
-
                 raise ValueError(
-                    "Foto kan niet klein genoeg "
-                    "worden gemaakt voor de limiet."
+                    "Foto kan niet verder worden verkleind tot 1 MB."
                 )
 
-            image = image.resize(
-                (
-                    max(320, int(width * 0.80)),
-                    max(320, int(height * 0.80))
-                ),
-                Image.Resampling.LANCZOS
+            new_size = (
+                max(320, int(width * 0.8)),
+                max(320, int(height * 0.8)),
             )
 
+            image = image.resize(new_size, Image.Resampling.LANCZOS)
 
-# ==========================================
-# BRONMEDIA VERZAMELEN
-# ==========================================
 
-def collect_candidates(client, published):
+# ============================================================
+# BRONPOSTEN OPHALEN
+# ============================================================
 
-    cutoff = (
-        datetime.now(timezone.utc)
-        - timedelta(days=MIN_AGE_DAYS)
-    )
-
-    cursor = None
+def collect_candidates(client, source_did, redfox_did, state):
     candidates = []
-
-    print(
-        f"\nBronaccount: {SOURCE}"
+    cursor = None
+    cutoff = datetime.now(timezone.utc) - timedelta(
+        days=MIN_AGE_DAYS
     )
 
-    print(
-        f"Minimumleeftijd: {MIN_AGE_DAYS} dagen"
+    log(
+        f"Zoeken naar originele media ouder dan "
+        f"{MIN_AGE_DAYS} dagen."
     )
 
-    for page in range(MAX_PAGES):
+    for page_number in range(1, MAX_PAGES + 1):
+        try:
+            response = client.get_author_feed(
+                actor=SOURCE_ACCOUNT,
+                limit=100,
+                cursor=cursor,
+                filter="posts_with_media",
+            )
+        except Exception as exc:
+            log(f"Fout bij ophalen bronfeed: {exc}")
+            break
 
-        print(
-            f"Bronpagina {page + 1}/{MAX_PAGES}"
-        )
+        feed = getattr(response, "feed", []) or []
 
-        result = client.get_author_feed(
-            actor=SOURCE,
-            limit=100,
-            cursor=cursor,
-            filter="posts_with_media"
-        )
+        if not feed:
+            break
 
-        for item in result.feed:
+        for item in feed:
+            post = getattr(item, "post", None)
 
-            post = item.post
-            record = post.record
+            if post is None:
+                continue
 
-            # Geen reposts
+            # Reposts uitsluiten.
             if getattr(item, "reason", None) is not None:
                 continue
 
-            # Alleen originele postrecords
-            if not isinstance(
-                record,
-                models.AppBskyFeedPost.Record
-            ):
+            record = getattr(post, "record", None)
+
+            if record is None:
                 continue
 
-            # Geen replies
-            if getattr(record, "reply", None) is not None:
+            # Alleen eigen originele bronposts; geen replies of quotes.
+            if is_reply(record) or is_quote_post(record):
                 continue
 
-            # Geen quote-posts
-            if is_quote_post(record):
+            author = getattr(post, "author", None)
+
+            if author is None:
                 continue
 
-            embed = getattr(
-                record,
-                "embed",
-                None
+            if getattr(author, "did", None) != source_did:
+                continue
+
+            created_at = parse_datetime(
+                getattr(record, "created_at", None)
             )
 
-            # Alleen foto's en video's
-            if not isinstance(
-                embed,
-                (
-                    models.AppBskyEmbedImages.Main,
-                    models.AppBskyEmbedVideo.Main
-                )
-            ):
+            if created_at is None or created_at > cutoff:
                 continue
 
-            try:
+            embed = get_embed(record)
 
-                created = datetime.fromisoformat(
-                    record.created_at.replace(
-                        "Z",
-                        "+00:00"
-                    )
-                )
-
-            except (ValueError, AttributeError):
+            if embed is None:
                 continue
 
-            # Minimaal 14 dagen oud
-            if created > cutoff:
-                continue
+            source_mentions = source_mentions_redfox(
+                record, redfox_did
+            )
 
-            uri = post.uri
+            # Foto's: elke afbeelding afzonderlijk publiceren.
+            images = getattr(embed, "images", None)
 
-            # Foto's afzonderlijk selecteren
-            if isinstance(
-                embed,
-                models.AppBskyEmbedImages.Main
-            ):
+            if images:
+                for image_index, image_item in enumerate(images):
+                    blob = getattr(image_item, "image", None)
+                    cid = get_cid(blob)
 
-                for index, image in enumerate(
-                    embed.images
-                ):
+                    if not cid:
+                        continue
 
                     media_key = (
-                        f"{uri}#image-{index}"
+                        f"{post.uri}#image-{image_index}"
                     )
 
-                    if media_key in published:
+                    if media_key in state:
                         continue
 
                     candidates.append({
-                        "created": created,
-                        "uri": uri,
+                        "key": media_key,
+                        "uri": post.uri,
                         "cid": post.cid,
-                        "media_key": media_key,
-                        "type": "image",
-                        "media": image
+                        "source_did": source_did,
+                        "created_at": created_at,
+                        "kind": "image",
+                        "blob_cid": cid,
+                        "alt": getattr(image_item, "alt", "") or "",
+                        "mentions_redfox": source_mentions,
                     })
 
-            # Video afzonderlijk selecteren
-            elif isinstance(
-                embed,
-                models.AppBskyEmbedVideo.Main
-            ):
+                continue
 
-                media_key = f"{uri}#video"
+            # Video's: alleen directe video-embeds.
+            video_blob = getattr(embed, "video", None)
 
-                if media_key in published:
+            if video_blob is not None:
+                cid = get_cid(video_blob)
+
+                if not cid:
+                    continue
+
+                media_key = f"{post.uri}#video"
+
+                if media_key in state:
                     continue
 
                 candidates.append({
-                    "created": created,
-                    "uri": uri,
+                    "key": media_key,
+                    "uri": post.uri,
                     "cid": post.cid,
-                    "media_key": media_key,
-                    "type": "video",
-                    "media": embed
+                    "source_did": source_did,
+                    "created_at": created_at,
+                    "kind": "video",
+                    "blob_cid": cid,
+                    "alt": getattr(embed, "alt", "") or "",
+                    "mentions_redfox": source_mentions,
                 })
 
-        cursor = result.cursor
+        cursor = getattr(response, "cursor", None)
+
+        log(
+            f"Pagina {page_number}/{MAX_PAGES}: "
+            f"{len(candidates)} geschikte media gevonden."
+        )
 
         if not cursor:
             break
 
-    # Oudste geschikte media eerst
-    candidates.sort(
-        key=lambda item: item["created"]
-    )
-
-    print(
-        f"\nNieuwe geschikte media: {len(candidates)}"
-    )
-
-    if candidates:
-
-        print(
-            "Oudste media: "
-            f"{candidates[0]['created'].isoformat()}"
-        )
+    # Oudste geschikte media eerst.
+    candidates.sort(key=lambda candidate: candidate["created_at"])
 
     return candidates
 
 
-# ==========================================
-# BLOB DOWNLOADEN VAN DE BRONPOST
-# ==========================================
+# ============================================================
+# MEDIA PUBLICEREN
+# ============================================================
 
-def download_blob(uri, blob):
+def publish_media(client, candidate, redfox_did):
+    kind = candidate["kind"]
 
-    did = uri.split("/")[2]
-    cid = blob.ref.link
-
-    url = (
-        "https://bsky.social/xrpc/"
-        "com.atproto.sync.getBlob"
-        f"?did={did}&cid={cid}"
-    )
-
-    return download(url)
-
-
-# ==========================================
-# MEDIA PUBLICEREN MET REDFOX-TAG
-# ==========================================
-
-def publish_media(
-    client,
-    candidate,
-    redfox_text,
-    redfox_facets
-):
-
-    media = candidate["media"]
-    media_type = candidate["type"]
-    uri = candidate["uri"]
-
-    # ======================================
-    # FOTO
-    # ======================================
-
-    if media_type == "image":
-
-        raw = download_blob(
-            uri,
-            media.image
+    if kind == "image":
+        raw_data = download_blob(
+            candidate["source_did"],
+            candidate["blob_cid"],
+            MAX_IMAGE_BYTES * 30,
         )
 
-        raw = resize_image(raw)
+        raw_data = resize_image(raw_data)
+        uploaded = client.upload_blob(raw_data)
 
-        upload = client.upload_blob(
-            raw
-        ).blob
-
-        image_args = {
-            "alt": getattr(media, "alt", "") or "",
-            "image": upload
-        }
-
-        aspect_ratio = getattr(
-            media,
-            "aspect_ratio",
-            None
+        embed = models.AppBskyEmbedImages.Main(
+            images=[
+                models.AppBskyEmbedImages.Image(
+                    alt=candidate["alt"],
+                    image=uploaded.blob,
+                )
+            ]
         )
 
-        if aspect_ratio is not None:
-            image_args["aspect_ratio"] = aspect_ratio
-
-        new_image = models.AppBskyEmbedImages.Image(
-            **image_args
+    elif kind == "video":
+        raw_data = download_blob(
+            candidate["source_did"],
+            candidate["blob_cid"],
+            MAX_VIDEO_BYTES,
         )
 
-        new_embed = models.AppBskyEmbedImages.Main(
-            images=[new_image]
-        )
+        uploaded = client.upload_blob(raw_data)
 
-    # ======================================
-    # VIDEO
-    # ======================================
+        embed = models.AppBskyEmbedVideo.Main(
+            video=uploaded.blob,
+            alt=candidate["alt"],
+        )
 
     else:
+        raise ValueError(f"Onbekend mediatype: {kind}")
 
-        raw = download_blob(
-            uri,
-            media.video
+    # RedFox uitsluitend toevoegen als de bronpost RedFox noemt.
+    if candidate["mentions_redfox"]:
+        text, facets = create_redfox_facet(redfox_did)
+        log("RedFox genoemd in bronpost: klikbare tag toevoegen.")
+    else:
+        text = ""
+        facets = []
+        log("RedFox niet genoemd in bronpost: geen RedFox-tag.")
+
+    if DRY_RUN:
+        log(
+            f"DRY RUN: zou {kind} publiceren; "
+            f"RedFox-tag={candidate['mentions_redfox']}."
         )
+        return f"DRY_RUN:{candidate['key']}"
 
-        if len(raw) > MAX_VIDEO_BYTES:
+    response = client.send_post(
+        text=text,
+        facets=facets,
+        embed=embed,
+    )
 
-            raise ValueError(
-                "Video groter dan 100 MB."
-            )
+    return response.uri
 
-        upload = client.upload_blob(
-            raw
-        ).blob
 
-        video_args = {
-            "video": upload
-        }
+# ============================================================
+# LAATSTE 3 EIGEN POSTS REBOOSTEN
+# ============================================================
 
-        aspect_ratio = getattr(
-            media,
-            "aspect_ratio",
-            None
+def reboost_own_posts(client, target_did):
+    log("Eigen posts ophalen voor reboost.")
+
+    try:
+        response = client.get_author_feed(
+            actor=TARGET_ACCOUNT,
+            limit=100,
+            filter="posts_with_media",
         )
-
-        if aspect_ratio is not None:
-            video_args["aspect_ratio"] = aspect_ratio
-
-        new_embed = models.AppBskyEmbedVideo.Main(
-            **video_args
-        )
-
-    # ======================================
-    # PUBLICEREN
-    # ======================================
-
-    return client.send_post(
-        text=redfox_text,
-        facets=redfox_facets,
-        embed=new_embed
-    )
-
-
-# ==========================================
-# HOOFDPROGRAMMA
-# ==========================================
-
-def main():
-
-    client = Client()
-
-    client.login(
-        TARGET,
-        PASSWORD
-    )
-
-    print(
-        f"Ingelogd als: {TARGET}"
-    )
-
-    state = load_state()
-    published = state["published"]
-
-    # Eerst de laatste drie eigen posts reboosten
-    reboost_own_posts(client)
-
-    # RedFox-DID ophalen voor echte mention
-    redfox_text, redfox_facets = (
-        create_redfox_mention(client)
-    )
-
-    print(
-        f"RedFox-tag: {redfox_text}"
-    )
-
-    # Geschikte media verzamelen en op datum sorteren
-    candidates = collect_candidates(
-        client,
-        published
-    )
-
-    if not candidates:
-
-        print(
-            "Geen nieuwe geschikte media gevonden."
-        )
-
+    except Exception as exc:
+        log(f"Eigen feed ophalen mislukt: {exc}")
         return
 
-    successful = 0
+    eligible = []
 
-    for candidate in candidates:
+    for item in getattr(response, "feed", []) or []:
+        post = getattr(item, "post", None)
 
-        if successful >= MAX_POSTS:
-            break
-
-        print(
-            f"\nMedia: {candidate['media_key']}"
-        )
-
-        print(
-            f"Datum: "
-            f"{candidate['created'].isoformat()}"
-        )
-
-        if DRY_RUN:
-
-            print(
-                "DRY_RUN: publicatie overgeslagen."
-            )
-
+        if post is None:
             continue
 
-        try:
+        if getattr(item, "reason", None) is not None:
+            continue
 
-            response = publish_media(
+        author = getattr(post, "author", None)
+
+        if author is None or getattr(author, "did", None) != target_did:
+            continue
+
+        record = getattr(post, "record", None)
+
+        if record is None:
+            continue
+
+        if is_reply(record) or is_quote_post(record):
+            continue
+
+        eligible.append(post)
+
+    # Nieuwste drie originele eigen posts selecteren.
+    eligible.sort(
+        key=lambda post: (
+            parse_datetime(
+                getattr(post.record, "created_at", None)
+            ) or datetime.min.replace(tzinfo=timezone.utc)
+        ),
+        reverse=True,
+    )
+
+    selected = eligible[:OWN_REBOOST_COUNT]
+
+    # Oudste van de geselecteerde drie eerst.
+    selected.reverse()
+
+    for post in selected:
+        try:
+            if DRY_RUN:
+                log(f"DRY RUN: zou eigen post reboosten: {post.uri}")
+                continue
+
+            viewer = getattr(post, "viewer", None)
+            existing_repost = getattr(viewer, "repost", None)
+
+            if existing_repost:
+                client.delete_repost(existing_repost)
+                time.sleep(REBOOST_DELAY)
+
+            client.repost(post.uri, post.cid)
+
+            log(f"Eigen post opnieuw gerepost: {post.uri}")
+            time.sleep(REBOOST_DELAY)
+
+        except Exception as exc:
+            log(f"Reboost mislukt voor {post.uri}: {exc}")
+
+
+# ============================================================
+# HOOFDPROGRAMMA
+# ============================================================
+
+def main():
+    client = Client()
+
+    log(f"Inloggen als {TARGET_ACCOUNT}.")
+
+    client.login(
+        TARGET_ACCOUNT,
+        PASSWORD,
+    )
+
+    target_profile = client.get_profile(
+        actor=TARGET_ACCOUNT
+    )
+
+    source_profile = client.get_profile(
+        actor=SOURCE_ACCOUNT
+    )
+
+    redfox_profile = client.get_profile(
+        actor=REDFOX_HANDLE
+    )
+
+    target_did = target_profile.did
+    source_did = source_profile.did
+    redfox_did = redfox_profile.did
+
+    log(f"Bron: {SOURCE_ACCOUNT}")
+    log(f"Doel: {TARGET_ACCOUNT}")
+    log(f"Bron-DID: {source_did}")
+    log(f"RedFox-DID opgehaald.")
+    log(f"Dry run: {DRY_RUN}")
+
+    state = load_state()
+
+    reboost_own_posts(
+        client,
+        target_did,
+    )
+
+    candidates = collect_candidates(
+        client,
+        source_did,
+        redfox_did,
+        state,
+    )
+
+    log(f"{len(candidates)} geschikte media gevonden.")
+
+    published_count = 0
+
+    for candidate in candidates:
+        if published_count >= MAX_POSTS:
+            break
+
+        try:
+            log(
+                f"Verwerken: {candidate['kind']} "
+                f"uit {candidate['uri']}."
+            )
+
+            published_uri = publish_media(
                 client,
                 candidate,
-                redfox_text,
-                redfox_facets
+                redfox_did,
             )
 
-            # Alleen na geslaagde publicatie opslaan
-            published[candidate["media_key"]] = (
-                response.uri
-            )
-
+            # Publicatiegeschiedenis na iedere geslaagde publicatie
+            # direct opslaan, zodat een volgende run kan hervatten.
+            state[candidate["key"]] = published_uri
             save_state(state)
 
-            successful += 1
+            published_count += 1
 
-            print(
-                f"Gepubliceerd: {response.uri}"
-            )
-
-            print(
-                "Klikbare RedFox-mention toegevoegd."
+            log(
+                f"Publicatie {published_count}/{MAX_POSTS} voltooid: "
+                f"{published_uri}"
             )
 
             time.sleep(POST_DELAY)
 
         except Exception as exc:
-
-            print(
-                f"Media overgeslagen na fout: {exc}"
+            log(
+                f"Media overgeslagen wegens fout: {exc}"
             )
 
-    print(
-        "\n========== RESULTAAT =========="
+    log(
+        f"Klaar. Nieuwe publicaties: "
+        f"{published_count}/{MAX_POSTS}."
     )
 
-    print(
-        f"Succesvol gepubliceerd: {successful}"
-    )
-
-    print(
-        f"Maximaal toegestaan: {MAX_POSTS}"
-    )
-
-    print(
-        f"Statusbestand: {STATE}"
-    )
-
-
-# ==========================================
-# START
-# ==========================================
 
 if __name__ == "__main__":
     main()
