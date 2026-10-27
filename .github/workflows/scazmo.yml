@@ -2,8 +2,7 @@ name: Tullageback Media
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "21 * * * *"
+ 
 
 jobs:
   repost-media:
