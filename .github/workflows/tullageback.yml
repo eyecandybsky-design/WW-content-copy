@@ -35,7 +35,7 @@ jobs:
         env:
           SOURCE_ACCOUNT: scazmo.bsky.social
           BSKY_USERNAME: snarlup.bsky.social
-          BSKY_PASSWORD: ${{ secrets.TULLAGEBACK_PASSWORD }}
+          BSKY_PASSWORD: ${{ secrets.BSKY_SNARLUP_PASSWORD }}
           STATE_FILE: tullageback_media_state.json
           MIN_AGE_DAYS: "30"
           MAX_PAGES: "20"
