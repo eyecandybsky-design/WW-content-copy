@@ -1,228 +1,343 @@
+
 import os
 import json
 import time
 import random
 import urllib.request
+
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
 from atproto import Client, models
 
 
-SOURCE = os.getenv("SOURCE_ACCOUNT", "scazmo.bsky.social").lstrip("@")
-TARGET = os.getenv("BSKY_USERNAME", "snarlup.bsky.social").lstrip("@")
+# ==========================================
+# INSTELLINGEN
+# ==========================================
+
+SOURCE = os.getenv(
+    "SOURCE_ACCOUNT",
+    "scazmo.bsky.social"
+).lstrip("@")
+
+TARGET = os.getenv(
+    "BSKY_USERNAME",
+    "snarlup.bsky.social"
+).lstrip("@")
+
 PASSWORD = os.environ["BSKY_SNARLUP_PASSWORD"]
 
-STATE = Path(os.getenv("STATE_FILE", "tullageback_media_state.json"))
-MIN_AGE_DAYS = int(os.getenv("MIN_AGE_DAYS", "14"))
+STATE = Path(
+    os.getenv(
+        "STATE_FILE",
+        "tullageback_media_state.json"
+    )
+)
+
+MIN_AGE_DAYS = int(os.getenv("MIN_AGE_DAYS", "30"))
 MAX_PAGES = int(os.getenv("MAX_PAGES", "30"))
 MAX_POSTS = int(os.getenv("MAX_POSTS", "3"))
 
 REDFOX_HANDLE = "redfoxofficial.bsky.social"
-REDFOX_TEXT = f"🦊 @{REDFOX_HANDLE} 🦊"
 
+
+# ==========================================
+# MEDIA DOWNLOADEN
+# ==========================================
 
 def download(url):
+
     req = urllib.request.Request(
         url,
         headers={"User-Agent": "KnightTakesQueenMedia/1.0"}
     )
+
     with urllib.request.urlopen(req, timeout=90) as resp:
         return resp.read()
 
 
-def get_redfox_text(client, record):
-    original_text = getattr(record, "text", "") or ""
-    original_facets = getattr(record, "facets", None) or []
+# ==========================================
+# PUBLICATIEGESCHIEDENIS
+# ==========================================
 
-    text_has_handle = REDFOX_HANDLE.lower() in original_text.lower()
+def load_state():
 
-    # Controleer ook of de originele post een klikbare mention bevat.
-    has_mention_facets = any(
-        any(
-            "mention" in type(feature).__name__.lower()
-            or "mention" in getattr(feature, "py_type", "").lower()
-            for feature in getattr(facet, "features", [])
-        )
-        for facet in original_facets
+    if STATE.exists():
+        state = json.loads(STATE.read_text(encoding="utf-8"))
+    else:
+        state = {"published": {}}
+
+    state.setdefault("published", {})
+    return state
+
+
+def save_state(state):
+
+    STATE.write_text(
+        json.dumps(state, indent=2),
+        encoding="utf-8"
     )
 
-    if not text_has_handle and not has_mention_facets:
+
+# ==========================================
+# REDFOX-TAG
+# ==========================================
+
+def get_redfox_text(client, record):
+
+    original_text = getattr(record, "text", "") or ""
+
+    if REDFOX_HANDLE.lower() not in original_text.lower():
         return "", None
 
     try:
         profile = client.get_profile(actor=REDFOX_HANDLE)
-        redfox_did = profile.did
-    except Exception as exc:
-        print(f"RedFox-profiel kon niet worden opgehaald: {exc}")
-        return "", None
+        text = f"🦊 @{REDFOX_HANDLE}"
 
-    mentioned_in_facets = any(
-        getattr(feature, "did", None) == redfox_did
-        for facet in original_facets
-        for feature in getattr(facet, "features", [])
-    )
-
-    if not text_has_handle and not mentioned_in_facets:
-        return "", None
-
-    text = REDFOX_TEXT
-    start = len("🦊 ".encode("utf-8"))
-    end = start + len(f"@{REDFOX_HANDLE}".encode("utf-8"))
-
-    facets = [
-        models.AppBskyRichtextFacet.Main(
+        # Bluesky-facets gebruiken UTF-8-byteposities
+        prefix = "🦊 "
+        facet = models.AppBskyRichtextFacet.Main(
             index=models.AppBskyRichtextFacet.ByteSlice(
-                byte_start=start,
-                byte_end=end,
+                byte_start=len(prefix.encode("utf-8")),
+                byte_end=len(text.encode("utf-8"))
             ),
             features=[
-                models.AppBskyRichtextFacet.Mention(did=redfox_did)
-            ],
+                models.AppBskyRichtextFacet.Mention(did=profile.did)
+            ]
         )
-    ]
 
-    return text, facets
+        return text, [facet]
 
+    except Exception as exc:
+        print(f"RedFox-tag kon niet worden gemaakt: {exc}")
+        return "", None
+
+
+# ==========================================
+# MEDIA OPHALEN EN TELLEN
+# ==========================================
 
 def collect_candidates(client, published):
-    cutoff = datetime.now(timezone.utc) - timedelta(days=MIN_AGE_DAYS)
-    candidates = {}
-    cursor = None
 
-    for _ in range(MAX_PAGES):
-        response = client.app.bsky.feed.get_author_feed(
-            {
-                "actor": SOURCE,
-                "limit": 100,
-                "filter": "posts_with_media",
-                "cursor": cursor,
-            }
+    cutoff = datetime.now(timezone.utc) - timedelta(days=MIN_AGE_DAYS)
+
+    cursor = None
+    candidates = []
+
+    totals = {
+        "feed_items": 0,
+        "reposts": 0,
+        "replies": 0,
+        "non_media": 0,
+        "media_posts": 0,
+        "too_new": 0,
+        "old_media_posts": 0,
+        "already_published": 0,
+        "new_images": 0,
+        "new_videos": 0
+    }
+
+    print(f"Bronaccount: {SOURCE}")
+    print(f"Zoeklimiet: {MAX_PAGES} pagina's")
+    print(f"Minimumleeftijd: {MIN_AGE_DAYS} dagen")
+
+    for page in range(MAX_PAGES):
+
+        print(f"Bronpagina {page + 1}/{MAX_PAGES} bekijken...")
+
+        result = client.get_author_feed(
+            actor=SOURCE,
+            limit=100,
+            cursor=cursor,
+            filter="posts_with_media"
         )
 
-        if not response.feed:
-            break
+        items = result.feed or []
+        totals["feed_items"] += len(items)
 
-        for item in response.feed:
+        for item in items:
+
             post = item.post
             record = post.record
-            uri = post.uri
 
-            if getattr(item, "reason", None):
+            if getattr(item, "reason", None) is not None:
+                totals["reposts"] += 1
                 continue
 
             if not isinstance(record, models.AppBskyFeedPost.Record):
                 continue
 
-            if getattr(record, "reply", None):
+            if getattr(record, "reply", None) is not None:
+                totals["replies"] += 1
                 continue
 
             embed = getattr(record, "embed", None)
 
-            if isinstance(embed, models.AppBskyEmbedImages.Main):
-                media_items = [
-                    ("image", index, image)
-                    for index, image in enumerate(embed.images)
-                ]
-            elif isinstance(embed, models.AppBskyEmbedVideo.Main):
-                media_items = [("video", 0, embed)]
-            else:
+            if not isinstance(
+                embed,
+                (
+                    models.AppBskyEmbedImages.Main,
+                    models.AppBskyEmbedVideo.Main
+                )
+            ):
+                totals["non_media"] += 1
                 continue
 
-            created_at = getattr(record, "created_at", None)
-            if not created_at:
-                continue
+            totals["media_posts"] += 1
 
             try:
-                post_date = datetime.fromisoformat(
-                    created_at.replace("Z", "+00:00")
+                created = datetime.fromisoformat(
+                    record.created_at.replace("Z", "+00:00")
                 )
             except (ValueError, AttributeError):
                 continue
 
-            if post_date > cutoff:
+            if created > cutoff:
+                totals["too_new"] += 1
                 continue
 
-            for media_type, index, media in media_items:
-                key = (
-                    f"{uri}#image-{index}"
-                    if media_type == "image"
-                    else f"{uri}#video"
-                )
+            totals["old_media_posts"] += 1
+            uri = post.uri
 
-                if key in published:
+            if isinstance(embed, models.AppBskyEmbedImages.Main):
+
+                for index, image in enumerate(embed.images):
+
+                    media_key = f"{uri}#image-{index}"
+
+                    if media_key in published:
+                        totals["already_published"] += 1
+                        continue
+
+                    candidates.append({
+                        "created": created,
+                        "uri": uri,
+                        "media_key": media_key,
+                        "type": "image",
+                        "media": image,
+                        "record": record
+                    })
+
+                    totals["new_images"] += 1
+
+            elif isinstance(embed, models.AppBskyEmbedVideo.Main):
+
+                media_key = f"{uri}#video"
+
+                if media_key in published:
+                    totals["already_published"] += 1
                     continue
 
-                candidates[key] = {
+                candidates.append({
+                    "created": created,
                     "uri": uri,
-                    "media": media,
-                    "media_type": media_type,
-                    "record": record,
-                    "created_at": created_at,
-                    "key": key,
-                }
+                    "media_key": media_key,
+                    "type": "video",
+                    "media": embed,
+                    "record": record
+                })
 
-        cursor = getattr(response, "cursor", None)
+                totals["new_videos"] += 1
+
+        cursor = result.cursor
+
         if not cursor:
+            print("Einde van de beschikbare bronfeed bereikt.")
             break
 
-    return list(candidates.values())
+    print("\n========== ZOEKSAMENVATTING ==========")
 
+    for key, value in totals.items():
+        print(f"{key}: {value}")
+
+    print(f"Nieuwe mediakandidaten: {len(candidates)}")
+    print("======================================\n")
+
+    return candidates
+
+
+# ==========================================
+# MEDIA PUBLICEREN
+# ==========================================
 
 def publish_media(client, candidate):
+
     uri = candidate["uri"]
     media = candidate["media"]
-    media_type = candidate["media_type"]
+    media_type = candidate["type"]
     record = candidate["record"]
 
     did = uri.split("/")[2]
+
     text, facets = get_redfox_text(client, record)
 
     if media_type == "image":
+
         blob = media.image
+
         url = (
-            "https://bsky.social/xrpc/com.atproto.sync.getBlob"
+            "https://bsky.social/xrpc/"
+            "com.atproto.sync.getBlob"
             f"?did={did}&cid={blob.ref.link}"
         )
+
         raw = download(url)
 
         if len(raw) > 1_000_000:
             raise ValueError("Afbeelding groter dan 1 MB.")
 
-        uploaded = client.upload_blob(raw)
+        uploaded = client.upload_blob(raw).blob
+
+        image_args = {
+            "alt": getattr(media, "alt", "") or "",
+            "image": uploaded
+        }
+
+        aspect_ratio = getattr(media, "aspect_ratio", None)
+
+        if aspect_ratio is not None:
+            image_args["aspect_ratio"] = aspect_ratio
+
+        new_image = models.AppBskyEmbedImages.Image(**image_args)
 
         new_embed = models.AppBskyEmbedImages.Main(
-            images=[
-                models.AppBskyEmbedImages.Image(
-                    alt=getattr(media, "alt", "") or "",
-                    image=uploaded.blob,
-                )
-            ]
+            images=[new_image]
         )
 
-    elif media_type == "video":
+    else:
+
         blob = media.video
+
         url = (
-            "https://bsky.social/xrpc/com.atproto.sync.getBlob"
+            "https://bsky.social/xrpc/"
+            "com.atproto.sync.getBlob"
             f"?did={did}&cid={blob.ref.link}"
         )
+
         raw = download(url)
 
         if len(raw) > 100_000_000:
             raise ValueError("Video groter dan 100 MB.")
 
-        uploaded = client.upload_blob(raw)
+        uploaded = client.upload_blob(raw).blob
 
-        new_embed = models.AppBskyEmbedVideo.Main(
-            video=uploaded.blob,
-            alt=getattr(media, "alt", "") or "",
-        )
+        video_args = {"video": uploaded}
 
-    else:
-        raise ValueError(f"Onbekend mediatype: {media_type}")
+        aspect_ratio = getattr(media, "aspect_ratio", None)
+
+        if aspect_ratio is not None:
+            video_args["aspect_ratio"] = aspect_ratio
+
+        alt = getattr(media, "alt", None)
+
+        if alt:
+            video_args["alt"] = alt
+
+        new_embed = models.AppBskyEmbedVideo.Main(**video_args)
 
     post_args = {
         "text": text,
-        "embed": new_embed,
+        "embed": new_embed
     }
 
     if facets:
@@ -231,24 +346,26 @@ def publish_media(client, candidate):
     return client.send_post(**post_args)
 
 
+# ==========================================
+# HOOFDPROGRAMMA
+# ==========================================
+
 def main():
-    print(f"Bronaccount: {SOURCE}")
-    print(f"Doelaccount: {TARGET}")
-    print(f"Minimum leeftijd: {MIN_AGE_DAYS} dagen")
-    print(f"Maximum posts deze run: {MAX_POSTS}")
 
     client = Client()
     client.login(TARGET, PASSWORD)
 
-    if STATE.exists():
-        with STATE.open("r", encoding="utf-8") as file:
-            state = json.load(file)
-    else:
-        state = {}
+    print(f"Ingelogd als: {TARGET}")
 
-    published = state.get("published", {})
+    state = load_state()
+    published = state["published"]
 
     candidates = collect_candidates(client, published)
+
+    if not candidates:
+        print("Geen nieuwe geschikte media gevonden.")
+        return
+
     random.shuffle(candidates)
 
     print(f"Geschikte media gevonden: {len(candidates)}")
@@ -256,38 +373,34 @@ def main():
     successful = 0
 
     for candidate in candidates:
+
         if successful >= MAX_POSTS:
             break
+
+        print(
+            f"Publicatiepoging {successful + 1}/{MAX_POSTS}: "
+            f"{candidate['media_key']}"
+        )
 
         try:
             response = publish_media(client, candidate)
 
-            published[candidate["key"]] = {
-                "published_at": datetime.now(timezone.utc).isoformat(),
-                "uri": getattr(response, "uri", ""),
-            }
+            published[candidate["media_key"]] = response.uri
+            save_state(state)
 
             successful += 1
-            print(
-                f"Media gepubliceerd: {candidate['key']} "
-                f"({successful}/{MAX_POSTS})"
-            )
 
-            time.sleep(2)
+            print(f"Gepubliceerd: {response.uri}")
 
         except Exception as exc:
-            print(f"Media overgeslagen: {candidate['key']} — {exc}")
+            print(f"Media overgeslagen na fout: {exc}")
 
-    state["published"] = published
-    state["last_run"] = datetime.now(timezone.utc).isoformat()
+    print(f"Totaal succesvol gepubliceerd: {successful}")
 
-    STATE.parent.mkdir(parents=True, exist_ok=True)
 
-    with STATE.open("w", encoding="utf-8") as file:
-        json.dump(state, file, indent=2, ensure_ascii=False)
-
-    print(f"Klaar. Aantal gepubliceerd: {successful}")
-
+# ==========================================
+# START
+# ==========================================
 
 if __name__ == "__main__":
     main()
