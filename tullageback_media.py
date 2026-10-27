@@ -17,12 +17,12 @@ from atproto import Client, models
 
 SOURCE = os.getenv(
     "SOURCE_ACCOUNT",
-    "eyescandy.bsky.social"
+    "scazmo.bsky.social"
 ).lstrip("@")
 
 TARGET = os.getenv(
     "BSKY_USERNAME",
-    "tullageback.bsky.social"
+    "snarlup.bsky.social"
 ).lstrip("@")
 
 PASSWORD = os.environ["BSKY_PASSWORD"]
