@@ -25,7 +25,7 @@ TARGET = os.getenv(
     "snarlup.bsky.social"
 ).lstrip("@")
 
-PASSWORD = os.environ["BSKY_PASSWORD"]
+PASSWORD = os.environ["BSKY_SNARLUP_PASSWORD"]
 
 STATE = Path(
     os.getenv(
