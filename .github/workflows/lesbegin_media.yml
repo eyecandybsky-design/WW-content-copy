@@ -1,0 +1,62 @@
+
+name: Lesbegin Media Autopost
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: lesbegin-media
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Publish old media posts
+        env:
+          LESBEGIN_BSKY_USERNAME: lesbegin.bsky.social
+          LESBEGIN_BSKY_PASSWORD: ${{ secrets.LESBEGIN_BSKY_PASSWORD }}
+
+          SOURCE_ACCOUNT: big-dominio.bsky.social
+
+          STATE_FILE: lesbegin_state.json
+
+          MIN_AGE_DAYS: '30'
+          MAX_PAGES: '30'
+          MAX_POSTS: '3'
+
+        run: |
+          python lesbegin_media.py
+
+      - name: Persist published history
+        if: success()
+        run: |
+          if [ -f lesbegin_state.json ]; then
+            git config user.name 'github-actions[bot]'
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+            git add lesbegin_state.json
+
+            if ! git diff --cached --quiet; then
+              git commit -m "Update Lesbegin media history"
+              git push
+            fi
+          fi
