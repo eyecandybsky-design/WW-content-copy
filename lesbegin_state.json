@@ -1,3 +1,7 @@
 {
-  "published": {}
+  "published": {
+    "at://did:plc:bgexh2fu3r2zt4bxok373s7o/app.bsky.feed.post/3mp4r2ei6tc26#image-0": "at://did:plc:trpfcjeopui5pnlvw7pbzauk/app.bsky.feed.post/3mzgyczikkq2l",
+    "at://did:plc:bgexh2fu3r2zt4bxok373s7o/app.bsky.feed.post/3moq55poee22f#image-0": "at://did:plc:trpfcjeopui5pnlvw7pbzauk/app.bsky.feed.post/3mzgyd3gjsv2p",
+    "at://did:plc:bgexh2fu3r2zt4bxok373s7o/app.bsky.feed.post/3mptd22szds2j#image-0": "at://did:plc:trpfcjeopui5pnlvw7pbzauk/app.bsky.feed.post/3mzgyd5fake2t"
+  }
 }
