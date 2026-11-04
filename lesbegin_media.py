@@ -16,7 +16,7 @@ from atproto import Client, models
 
 SOURCE = os.getenv(
     "SOURCE_ACCOUNT",
-    "big-dominio.bsky.social"
+    "@leonie04.bsky.social"
 ).lstrip("@")
 
 TARGET = os.getenv(
