@@ -21,7 +21,7 @@ SOURCE = os.getenv(
 
 TARGET = os.getenv(
     "LESBEGIN_BSKY_USERNAME",
-    "lesbegin.bsky.social"
+    "sexybynature.bsky.social"
 ).lstrip("@")
 
 PASSWORD = os.environ["LESBEGIN_BSKY_PASSWORD"]
