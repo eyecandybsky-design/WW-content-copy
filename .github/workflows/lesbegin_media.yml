@@ -32,7 +32,7 @@ jobs:
 
       - name: Publish old media posts
         env:
-          LESBEGIN_BSKY_USERNAME: lesbegin.bsky.social
+          LESBEGIN_BSKY_USERNAME: sexybynature.bsky.social
           LESBEGIN_BSKY_PASSWORD: ${{ secrets.LESBEGIN_BSKY_PASSWORD }}
 
           SOURCE_ACCOUNT: leonie04.bsky.social
