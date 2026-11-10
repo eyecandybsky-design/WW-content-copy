@@ -35,7 +35,7 @@ jobs:
           BSKY_USERNAME: womenworld.bsky.social
           BSKY_PASSWORD: ${{ secrets.BSKY_PASSWORD }}
 
-          SOURCE_ACCOUNT: melli848.bsky.social
+          SOURCE_ACCOUNT: tasha510.bsky.social
 
           STATE_FILE: womenworld_state.json
 
