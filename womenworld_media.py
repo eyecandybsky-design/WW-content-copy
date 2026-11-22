@@ -519,10 +519,10 @@ def main():
                     url
                 )
 
-                if len(raw) > 1_000_000:
+                if len(raw) > 2_000_000:
 
                     raise ValueError(
-                        "Afbeelding groter dan 1 MB."
+                        "Afbeelding groter dan 2 MB."
                     )
 
                 uploaded = client.upload_blob(
